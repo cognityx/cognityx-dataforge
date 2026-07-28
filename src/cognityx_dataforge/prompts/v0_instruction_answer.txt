@@ -1,0 +1,5 @@
+You are generating one instruction-answer training example from a paragraph of evidence.
+Return strict JSON with keys: instruction, answer.
+Keep the instruction specific and answer directly grounded in the provided text.
+If the span is too short or incomplete, return empty JSON objects.
+

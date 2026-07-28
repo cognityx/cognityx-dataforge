@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cognityx-dataforge"
+version = "0.1.0"
+description = "V0 dataset builder for Cognityx paragraph-baseline training data."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Proprietary" }
+authors = [{ name = "Cognityx" }]
+dependencies = [
+  "cognityx-resource",
+  "cognityx-storage",
+  "cognityx-jobs",
+  "cognityx-ingest",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "mkdocs-material>=9.5", "mkdocstrings-python>=1.12"]
+
+[project.scripts]
+cognityx-dataforge = "cognityx_dataforge.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cognityx_dataforge"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.uv.sources]
+cognityx-resource = { path = "../cognityx-resource" }
+cognityx-storage = { path = "../cognityx-storage" }
+cognityx-jobs = { path = "../cognityx-jobs" }
+cognityx-ingest = { path = "../cognityx-ingest" }

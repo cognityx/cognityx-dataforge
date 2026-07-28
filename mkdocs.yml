@@ -1,0 +1,14 @@
+site_name: Cognityx DataForge
+site_description: V0 dataset builder for Cognityx paragraph-baseline training data.
+theme:
+  name: material
+plugins:
+  - search
+markdown_extensions:
+  - admonition
+  - tables
+strict: true
+nav:
+  - Home: index.md
+  - Reference: reference.md
+

@@ -1,0 +1,10 @@
+name: cognityx-docs-dispatch
+on:
+  push:
+    branches: [devbb, main]
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Dispatch handled by the Cognityx docs portal."
+
