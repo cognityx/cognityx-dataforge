@@ -1,0 +1,1 @@
+Discover every coherent fact, rule, definition, process, relationship, or decision condition supported by the evidence. Return strict JSON with a knowledge_units array. Each item must include canonical_statement, supporting_facts, concepts, prerequisites, difficulty, ambiguity_flags, and source_evidence_ids.

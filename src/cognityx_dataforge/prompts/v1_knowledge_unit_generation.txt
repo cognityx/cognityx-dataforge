@@ -1,0 +1,1 @@
+Write one source-grounded instruction and answer for this knowledge unit. Return strict JSON with keys instruction and answer. Do not add facts not present in the cited evidence.

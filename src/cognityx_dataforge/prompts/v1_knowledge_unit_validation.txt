@@ -1,0 +1,1 @@
+Validate the instruction-answer pair against the cited evidence. Return strict JSON with decision (accept or reject) and reasons containing answerability, factual_support, contradiction, missing_critical_information, instruction_clarity, and answer_completeness.

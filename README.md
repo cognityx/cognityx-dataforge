@@ -1,9 +1,10 @@
 # Cognityx DataForge
 
-DataForge builds the V0 paragraph-baseline dataset from a completed Cognityx
-Ingest run. It reads durable ingest artifacts through Storage, validates
-evidence and context, generates instruction/answer candidates per paragraph,
-and writes reproducible JSONL artifacts plus a dataset manifest.
+DataForge builds V0 datasets from a completed Cognityx Ingest run. The
+`paragraph-qa` recipe preserves the paragraph baseline; `knowledge-unit-qa`
+discovers coherent source-grounded units and validates generated answers.
+Both recipes read durable ingest artifacts through Storage and write
+reproducible JSONL artifacts plus a dataset manifest.
 
 DataForge is a batch library and CLI, not a FastAPI service. It does not own
 identity or ACL policy: Ingest, Storage, Jobs, and Inference retain their

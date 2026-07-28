@@ -1,8 +1,9 @@
 # Cognityx DataForge
 
-DataForge is the Cognityx V0 paragraph-baseline dataset builder. It turns a
-completed Ingest run into deterministic, inspectable JSONL artifacts for
-training and evaluation.
+DataForge provides two V0 recipes: `paragraph-qa` preserves the original
+paragraph baseline, while `knowledge-unit-qa` discovers provenance-preserving
+knowledge units and validates generated answers against source evidence. Both
+turn a completed Ingest run into deterministic, inspectable JSONL artifacts.
 
 The V0 boundary is deliberately small: DataForge owns dataset construction,
 validation, generation, rejection records, and dataset manifests. Ingest owns
