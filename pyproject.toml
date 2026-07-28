@@ -19,6 +19,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "mkdocs-material>=9.5", "mkdocstrings-python>=1.12"]
+inference = ["cognityx-inference"]
 
 [project.scripts]
 cognityx-dataforge = "cognityx_dataforge.cli:main"
@@ -35,6 +36,7 @@ cognityx-resource = { git = "https://github.com/cognityx/cognityx-resource.git" 
 cognityx-storage = { git = "https://github.com/cognityx/cognityx-storage.git" }
 cognityx-jobs = { git = "https://github.com/cognityx/cognityx-jobs.git" }
 cognityx-ingest = { git = "https://github.com/cognityx/cognityx-ingest.git" }
+cognityx-inference = { git = "https://github.com/cognityx/llm-benchmark.git" }
 
 [tool.uv]
 override-dependencies = [

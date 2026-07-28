@@ -4,9 +4,11 @@
 
 ```bash
 cognityx-dataforge build \
-  --run-manifest storage://runs/<run-id>/manifest.json \
-  --dataset-id my-dataset \
-  --variant v0
+  --input-manifest storage://local-main/artifacts/ingest/runs/<run-id>/manifest.json \
+  --dataset-name my-dataset \
+  --variant v0 \
+  --config dataforge.toml \
+  --storage-root /tmp/cognityx-storage
 ```
 
 The command returns JSON containing the job id, dataset id, record count, and
@@ -33,9 +35,10 @@ remain inspectable instead of silently disappearing.
 from cognityx_dataforge.build import build_dataset
 
 result = build_dataset(
-    run_manifest_uri="storage://runs/run-123/manifest.json",
-    dataset_id="my-dataset",
+    input_manifest_uri="storage://local-main/artifacts/ingest/runs/run-123/manifest.json",
+    dataset_name="my-dataset",
     variant="v0",
+    config_path="dataforge.toml",
 )
 print(result["dataset_manifest_uri"])
 ```
@@ -44,8 +47,13 @@ The build function accepts an optional injected inference client, keeping unit
 tests and local dry runs independent of a live model server.
 
 For a local smoke test, provide a completed run manifest and configure the
-Storage backend used by the workspace. A live Inference endpoint is only
-required when the injected client is omitted.
+same Storage Runtime used by Ingest with `--storage-root` or `--storage-config`.
+A live Inference endpoint is only required when the injected client is omitted;
+install it with `pip install cognityx-dataforge[inference]`.
+
+To export records, use `dataset export <manifest-uri> --output records.jsonl`.
+The command resolves `records_uri`, verifies its checksum, and writes only the
+records JSONL artifact.
 
 ## Validation
 

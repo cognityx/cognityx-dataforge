@@ -1,37 +1,61 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 
-from cognityx_storage import StorageClient
-from cognityx_storage.local import LocalStorageBackend
+from cognityx_storage import StorageConfig, StorageRuntime
 
-from cognityx_dataforge.build import build_dataset
+from cognityx_dataforge.build import _store_for_uri, build_dataset
+
+
+def _runtime(args: argparse.Namespace) -> StorageRuntime:
+    if args.storage_config:
+        return StorageRuntime.load(config_file=args.storage_config)
+    return StorageRuntime.from_config(StorageConfig.built_in(root=args.storage_root))
+
+
+def _records_checksum(data: bytes) -> str:
+    return hashlib.sha256(json.dumps(data.decode("utf-8"), sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="cognityx-dataforge")
     sub = parser.add_subparsers(dest="command", required=True)
+
     build = sub.add_parser("build")
     build.add_argument("--input-manifest", required=True)
     build.add_argument("--dataset-name", required=True)
     build.add_argument("--variant", required=True)
     build.add_argument("--config", required=True)
-    show = sub.add_parser("dataset")
-    dataset_sub = show.add_subparsers(dest="dataset_command", required=True)
-    dataset_show = dataset_sub.add_parser("show")
-    dataset_show.add_argument("dataset_manifest_uri")
-    dataset_export = dataset_sub.add_parser("export")
-    dataset_export.add_argument("dataset_manifest_uri")
-    dataset_export.add_argument("--output", required=True)
+    build.add_argument("--storage-root", default="/tmp/cognityx-dataforge-storage")
+    build.add_argument("--storage-config")
+
+    dataset = sub.add_parser("dataset")
+    dataset_sub = dataset.add_subparsers(dest="dataset_command", required=True)
+    for name in ("show", "export"):
+        command = dataset_sub.add_parser(name)
+        command.add_argument("dataset_manifest_uri")
+        command.add_argument("--storage-root", default="/tmp/cognityx-dataforge-storage")
+        command.add_argument("--storage-config")
+        if name == "export":
+            command.add_argument("--output", required=True)
+
     args = parser.parse_args()
-    storage = StorageClient(LocalStorageBackend())
+    runtime = _runtime(args)
     if args.command == "build":
-        print(json.dumps(build_dataset(args.input_manifest, args.dataset_name, args.variant, args.config, storage=storage), indent=2))
-    elif args.dataset_command == "show":
-        with storage.open(args.dataset_manifest_uri.removeprefix("storage://")) as handle:
-            print(handle.read().decode("utf-8"))
-    elif args.dataset_command == "export":
-        with storage.open(args.dataset_manifest_uri.removeprefix("storage://")) as handle:
-            Path(args.output).write_bytes(handle.read())
+        print(json.dumps(build_dataset(args.input_manifest, args.dataset_name, args.variant, args.config, runtime=runtime), indent=2))
+        return
+    manifest_store, manifest_key = _store_for_uri(runtime, args.dataset_manifest_uri, role_name="dataset")
+    with manifest_store.open(manifest_key) as handle:
+        manifest = json.load(handle)
+    if args.dataset_command == "show":
+        print(json.dumps(manifest, indent=2, sort_keys=True))
+        return
+    records_store, records_key = _store_for_uri(runtime, manifest["records_uri"], role_name="dataset")
+    with records_store.open(records_key) as handle:
+        records = handle.read()
+    if _records_checksum(records) != manifest["records_checksum"]:
+        raise SystemExit("records.jsonl checksum verification failed")
+    Path(args.output).write_bytes(records)

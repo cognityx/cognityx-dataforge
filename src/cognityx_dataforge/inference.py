@@ -50,3 +50,14 @@ class GeneratorAdapter:
         if not instruction or not answer:
             raise ValueError("Incomplete generator output")
         return {"instruction": instruction, "answer": answer}
+
+
+def load_inference_client() -> Any:
+    try:
+        from cognityx_inference.client import CognityxInferenceClient
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "Inference support is not installed. Install DataForge with "
+            "`pip install cognityx-dataforge[inference]` or inject an inference client."
+        ) from exc
+    return CognityxInferenceClient()
