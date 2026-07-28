@@ -6,7 +6,7 @@
 cognityx-dataforge build \
   --input-manifest storage://local-main/artifacts/ingest/runs/<run-id>/manifest.json \
   --dataset-name my-dataset \
-  --variant v0 \
+  --recipe paragraph-qa \
   --config dataforge.toml \
   --storage-root /tmp/cognityx-storage
 ```
@@ -25,9 +25,28 @@ datasets/<dataset-id>/<dataset-version>/
   run-events.jsonl
 ```
 
-The manifest records source identity, prompt and variant metadata, split
+The manifest records source identity, recipe, prompt and model metadata, split
 counts, checksums, and the URIs of the JSONL artifacts. Rejected generations
-remain inspectable instead of silently disappearing.
+remain inspectable instead of silently disappearing. The compatibility aliases
+`v0` and `v1` map to `paragraph-qa` and `knowledge-unit-qa`; `--variant` is
+deprecated.
+
+## Knowledge-unit QA
+
+```bash
+cognityx-dataforge build \
+  --input-manifest <run-manifest-uri> \
+  --dataset-name research \
+  --recipe knowledge-unit-qa \
+  --config dataforge-knowledge.toml \
+  --storage-root /tmp/cognityx-storage
+```
+
+This recipe discovers multiple provenance-preserving knowledge units from each
+evidence record, generates instruction-answer candidates, and validates them
+against the cited evidence. It writes `knowledge-units.jsonl`,
+`validations.jsonl`, and `rejections.jsonl`; rejected records are excluded
+from `records.jsonl`.
 
 ## Python API
 
@@ -37,7 +56,7 @@ from cognityx_dataforge.build import build_dataset
 result = build_dataset(
     input_manifest_uri="storage://local-main/artifacts/ingest/runs/run-123/manifest.json",
     dataset_name="my-dataset",
-    variant="v0",
+    recipe="paragraph-qa",
     config_path="dataforge.toml",
 )
 print(result["dataset_manifest_uri"])

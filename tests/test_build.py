@@ -12,6 +12,7 @@ from cognityx_storage import LocalStorageBackend, StorageClient, StorageConfig, 
 
 from cognityx_dataforge.build import build_dataset, resolve_storage_uri
 from cognityx_dataforge.cli import main
+from cognityx_dataforge.recipes import normalize_recipe
 
 
 class FakeClient:
@@ -22,10 +23,40 @@ class FakeClient:
         return {"choices": [{"message": {"content": json.dumps({"instruction": "Ask", "answer": "Answer"})}}]}
 
 
+class KnowledgeFakeClient(FakeClient):
+    validations = 0
+
+    def chat(self, **kwargs):
+        self.calls += 1
+        prompt = kwargs["messages"][-1]["content"]
+        if "Validate the instruction-answer" in prompt:
+            self.validations += 1
+            payload = {"decision": "reject" if self.validations == 2 else "accept", "reasons": {"factual_support": "checked"}}
+        elif "knowledge-unit" in prompt or "coherent fact" in prompt:
+            payload = {"knowledge_units": [
+                {"canonical_statement": "A rule applies", "supporting_facts": ["A rule applies"], "concepts": ["rule"]},
+                {"canonical_statement": "A second fact applies", "supporting_facts": ["A second fact applies"], "concepts": ["fact"]},
+            ]}
+        else:
+            payload = {"instruction": "Ask", "answer": "Answer"}
+        return {"choices": [{"message": {"content": json.dumps(payload)}}]}
+
+
 def config_file(tmp_path: Path) -> Path:
     config = tmp_path / "config.toml"
     config.write_text(
         '[models.generator]\nmodel="fake"\nbackend="fake"\nprofile="test"\nmax_output_tokens=32\n',
+        encoding="utf-8",
+    )
+    return config
+
+
+def knowledge_config_file(tmp_path: Path) -> Path:
+    config = tmp_path / "knowledge-config.toml"
+    config.write_text(
+        '[models.generator]\nmodel="fake-generator"\nbackend="fake"\nprofile="test"\nmax_output_tokens=32\n'
+        '[models.validator]\nmodel="fake-validator"\nbackend="fake"\nprofile="test"\nmax_output_tokens=32\n'
+        '[prompt_versions]\nknowledge_unit="1.0"\ngeneration="1.0"\nvalidation="1.0"\n',
         encoding="utf-8",
     )
     return config
@@ -128,6 +159,30 @@ def test_resolve_storage_uri_supports_shared_and_profile_namespace(tmp_path: Pat
     assert shared_store.backend_name == profile_store.backend_name
 
 
+def test_recipe_aliases_and_legacy_manifest_readability():
+    assert normalize_recipe("v0") == "paragraph-qa"
+    assert normalize_recipe("v1") == "knowledge-unit-qa"
+    assert normalize_recipe(variant="v0") == "paragraph-qa"
+
+
+def test_knowledge_unit_recipe_discovers_validates_and_rejects(tmp_path: Path):
+    runtime = StorageRuntime.from_config(StorageConfig.built_in(root=tmp_path / "storage"))
+    artifacts = runtime.for_role("artifact")
+    evidence = {"evidence_id": "e1", "document_id": "doc-1", "page_number": 1, "text": "A rule applies. A second fact applies.", "char_start": 0, "char_end": 38, "source_asset_id": "asset-1", "bundle_id": "bundle-1", "context_id": "ctx-1", "sequence_number": 0, "source_sha256": "sha-1", "run_id": "run-ku"}
+    evidence_uri = artifacts.put_bytes("ingest/documents/doc-1/evidence.jsonl", (json.dumps(evidence) + "\n").encode(), media_type="application/x-ndjson").uri
+    manifest_uri = artifacts.put_json("ingest/runs/run-ku/manifest.json", {"schema": "cognityx.ingest.run", "run_id": "run-ku", "context_id": "ctx-1", "source_assets": [{"asset_id": "asset-1", "sha256": "sha-1"}], "document_ids": ["doc-1"], "evidence_refs": [evidence_uri]}).uri
+    result = build_dataset(manifest_uri, "ku", "knowledge-unit-qa", knowledge_config_file(tmp_path), runtime=runtime, inference_client=KnowledgeFakeClient())
+    assert result["recipe"] == "knowledge-unit-qa"
+    dataset = runtime.for_role("dataset")
+    version = result["dataset_manifest_uri"].rsplit("/", 2)[-2]
+    with dataset.open(f"{result['dataset_id']}/{version}/manifest.json") as handle:
+        payload = json.load(handle)
+    assert payload["recipe"] == "knowledge-unit-qa"
+    assert payload["knowledge_unit_count"] == 2
+    assert payload["accepted_count"] == 1
+    assert payload["rejected_count"] == 1
+
+
 def test_real_ingest_to_dataforge_export(tmp_path: Path):
     root = tmp_path / "storage"
     runtime = StorageRuntime.from_config(StorageConfig.built_in(root=root))
@@ -160,12 +215,12 @@ def test_real_ingest_to_dataforge_export(tmp_path: Path):
     )
     ingest_result = service.ingest_path(pdf, context=context, registry=registry)
     assert ingest_result.run_id == "real-ingest-run"
-    fake = FakeClient()
+    fake = KnowledgeFakeClient()
     result = build_dataset(
         ingest_result.run_manifest_uri,
-        "real-ingest",
-        "v0",
-        config_file(tmp_path),
+        "real-ingest-ku",
+        "knowledge-unit-qa",
+        knowledge_config_file(tmp_path),
         runtime=runtime,
         inference_client=fake,
     )

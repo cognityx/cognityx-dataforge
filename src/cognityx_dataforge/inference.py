@@ -52,6 +52,22 @@ class GeneratorAdapter:
         return {"instruction": instruction, "answer": answer}
 
 
+class StructuredAdapter:
+    def __init__(self, client: Any, config: GeneratorConfig) -> None:
+        self.client = client
+        self.config = config
+
+    def ask(self, prompt: str, system: str) -> str:
+        response = self.client.chat(
+            model=self.config.model,
+            backend=self.config.backend,
+            profile=self.config.profile,
+            messages=[{"role": "system", "content": system}, {"role": "user", "content": prompt}],
+            max_tokens=self.config.max_output_tokens,
+        )
+        return response.get("choices", [{}])[0].get("message", {}).get("content", "")
+
+
 def load_inference_client() -> Any:
     try:
         from cognityx_inference.client import CognityxInferenceClient

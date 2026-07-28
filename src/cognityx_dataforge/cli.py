@@ -8,6 +8,7 @@ from pathlib import Path
 from cognityx_storage import StorageConfig, StorageRuntime
 
 from cognityx_dataforge.build import _store_for_uri, build_dataset
+from cognityx_dataforge.recipes import normalize_recipe
 
 
 def _runtime(args: argparse.Namespace) -> StorageRuntime:
@@ -27,7 +28,9 @@ def main() -> None:
     build = sub.add_parser("build")
     build.add_argument("--input-manifest", required=True)
     build.add_argument("--dataset-name", required=True)
-    build.add_argument("--variant", required=True)
+    recipe_group = build.add_mutually_exclusive_group(required=True)
+    recipe_group.add_argument("--recipe")
+    recipe_group.add_argument("--variant", help="Deprecated alias for --recipe")
     build.add_argument("--config", required=True)
     build.add_argument("--storage-root", default="/tmp/cognityx-dataforge-storage")
     build.add_argument("--storage-config")
@@ -45,7 +48,7 @@ def main() -> None:
     args = parser.parse_args()
     runtime = _runtime(args)
     if args.command == "build":
-        print(json.dumps(build_dataset(args.input_manifest, args.dataset_name, args.variant, args.config, runtime=runtime), indent=2))
+        print(json.dumps(build_dataset(args.input_manifest, args.dataset_name, normalize_recipe(args.recipe, variant=args.variant), args.config, runtime=runtime), indent=2))
         return
     manifest_store, manifest_key = _store_for_uri(runtime, args.dataset_manifest_uri, role_name="dataset")
     with manifest_store.open(manifest_key) as handle:
