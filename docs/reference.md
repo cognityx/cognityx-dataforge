@@ -43,6 +43,10 @@ print(result["dataset_manifest_uri"])
 The build function accepts an optional injected inference client, keeping unit
 tests and local dry runs independent of a live model server.
 
+For a local smoke test, provide a completed run manifest and configure the
+Storage backend used by the workspace. A live Inference endpoint is only
+required when the injected client is omitted.
+
 ## Validation
 
 Before generation, DataForge checks the ingest manifest schema, evidence
