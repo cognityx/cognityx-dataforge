@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from cognityx_jobs import JobRepository
-from cognityx_storage import StorageConfig, StorageRuntime
+from cognityx_storage import StorageClient, StorageConfig, StorageRuntime
 
 from cognityx_dataforge.config import DataForgeConfig
 from cognityx_dataforge.dataset import checksum, deterministic_id, split_for_index
@@ -29,16 +29,30 @@ def _runtime(root: str | Path | None, config_path: str | Path | None) -> Storage
     return StorageRuntime.from_config(StorageConfig.built_in(root=root or "/tmp/cognityx-dataforge-storage"))
 
 
-def _store_for_uri(runtime: StorageRuntime, uri: str, role_name: str = "artifact"):
+def resolve_storage_uri(runtime: StorageRuntime, uri: str, role_name: str = "artifact"):
+    """Resolve both shared-scope and profile/namespace Storage URIs."""
     if not uri.startswith("storage://"):
         raise ValueError(f"Expected storage URI, got: {uri}")
     remainder = uri.removeprefix("storage://")
-    profile, _, key = remainder.partition("/")
-    store = runtime.for_profile(profile, role_name=role_name)
+    first, separator, tail = remainder.partition("/")
+    if first == "shared":
+        profile = runtime.config.default_profile
+        if profile is None:
+            raise ValueError("Storage configuration has no default profile for shared URI")
+        runtime.for_profile(profile, role_name=role_name)
+        backend = runtime._backends[profile]  # Runtime owns the configured backend lifecycle.
+        return StorageClient(backend).for_shared_data(), tail
+    if first not in runtime.config.profiles:
+        raise ValueError(f"Unknown storage URI profile: {first}")
+    store = runtime.for_profile(first, role_name=role_name)
+    key = tail if separator else ""
     namespace = store.namespace.strip("/")
     if namespace and key.startswith(namespace + "/"):
         key = key[len(namespace) + 1 :]
     return store, key
+
+
+_store_for_uri = resolve_storage_uri
 
 
 def _jsonl(rows: list[dict[str, Any]]) -> bytes:
@@ -60,11 +74,41 @@ def build_dataset(
     runtime = runtime or _runtime(storage_root, storage_config)
     jobs = jobs or JobRepository(":memory:")
     config = DataForgeConfig.load(config_path)
-    manifest_store, manifest_key = _store_for_uri(runtime, input_manifest_uri)
+    manifest_store, manifest_key = resolve_storage_uri(runtime, input_manifest_uri)
     with manifest_store.open(manifest_key) as handle:
         manifest = load_run_manifest(json.load(handle))
+    dataset_id = deterministic_id(dataset_name, variant)
+    dataset_version = deterministic_id(dataset_name, variant, checksum(manifest), checksum(asdict(config)), config.generator.model, config.prompt_version)
+    dataset_store = runtime.for_role("dataset")
+    dataset_root = f"{dataset_id}/{dataset_version}"
+    manifest_key = f"{dataset_root}/manifest.json"
+    expected_source_checksum = checksum(manifest)
+    expected_config_checksum = checksum(asdict(config))
+    if dataset_store.exists(manifest_key):
+        with dataset_store.open(manifest_key) as handle:
+            existing = json.load(handle)
+        records_store, records_key = resolve_storage_uri(runtime, existing["records_uri"], role_name="dataset")
+        with records_store.open(records_key) as handle:
+            records_bytes = handle.read()
+        if (
+            existing.get("source_manifest_checksum") != expected_source_checksum
+            or existing.get("configuration_checksum") != expected_config_checksum
+            or existing.get("prompt_version") != config.prompt_version
+            or existing.get("generator") != asdict(config.generator)
+            or checksum(records_bytes.decode("utf-8")) != existing.get("records_checksum")
+        ):
+            raise ValueError("Existing immutable dataset does not match this build identity")
+        return {
+            "run_id": existing["run_id"],
+            "job_id": existing["job_id"],
+            "dataset_id": existing["dataset_id"],
+            "variant": existing["variant"],
+            "record_count": existing["accepted_count"],
+            "dataset_manifest_uri": dataset_store.uri(manifest_key),
+            "reused": True,
+        }
     job = jobs.create(
-        deterministic_id(dataset_name, variant, checksum(manifest), checksum(asdict(config))),
+        deterministic_id(dataset_name, variant, expected_source_checksum, expected_config_checksum),
         "dataforge.build",
         {"dataset_name": dataset_name, "variant": variant, "source_manifest_uri": input_manifest_uri},
     )
@@ -115,14 +159,10 @@ def build_dataset(
                     },
                 )
                 records.append(record)
-        dataset_id = deterministic_id(dataset_name, variant)
-        dataset_version = deterministic_id(dataset_name, variant, checksum(manifest), checksum(asdict(config)), config.generator.model, config.prompt_version)
         records_payload = [record.to_dict() for record in records]
         candidates_bytes = _jsonl(candidates)
         records_bytes = _jsonl(records_payload)
         rejections_bytes = _jsonl(rejections)
-        dataset_store = runtime.for_role("dataset")
-        dataset_root = f"{dataset_id}/{dataset_version}"
         records_key = f"{dataset_root}/records.jsonl"
         manifest_payload = {
             "dataset_id": dataset_id,
@@ -130,8 +170,8 @@ def build_dataset(
             "variant": variant,
             "dataset_version": dataset_version,
             "source_manifest_uri": input_manifest_uri,
-            "source_manifest_checksum": checksum(manifest),
-            "configuration_checksum": checksum(asdict(config)),
+            "source_manifest_checksum": expected_source_checksum,
+            "configuration_checksum": expected_config_checksum,
             "generator": asdict(config.generator),
             "prompt_version": config.prompt_version,
             "accepted_count": len(records),
