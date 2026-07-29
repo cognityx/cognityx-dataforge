@@ -19,10 +19,13 @@ class Client:
         }
 
     def provider_status(self):
-        return [{"provider": "gemini", "configured": True}]
+        return [
+            {"provider": "gemini", "enabled": True, "configuration_status": "configured", "credential_status": "not_required"},
+            {"provider": "openai", "enabled": True, "configuration_status": "configured", "credential_status": "configured"},
+        ]
 
     def provider_capabilities(self, provider, model):
-        return {"structured_output": True, "model_discovery": False}
+        return {"state": "certified", "verification_source": "test", "capabilities": {"structured_output": True}, "parameter_policy": {"supported": ["response_format"]}, "context": {}, "limits": {}}
 
 
 def settings(enabled=False):

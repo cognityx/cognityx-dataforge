@@ -18,7 +18,7 @@ from cognityx_dataforge.evidence import (
     load_run_manifest,
     validate_context,
 )
-from cognityx_dataforge.inference import GeneratorAdapter, GeneratorConfig, InferenceClientPool, StructuredAdapter, TokenBudgetError, load_inference_client
+from cognityx_dataforge.inference import GeneratorAdapter, GeneratorConfig, InferenceClientPool, StructuredAdapter, TokenBudgetError, load_inference_client, normalized_error_category
 from cognityx_dataforge.knowledge import KnowledgeUnit, parse_knowledge_units
 from cognityx_dataforge.models import DatasetRecord
 from cognityx_dataforge.paragraphs import paragraph_spans
@@ -140,6 +140,7 @@ def _build_knowledge_unit_probed(*, manifest: dict[str, Any], dataset_name: str,
     evidence_by_id = {item.evidence_id: item for item in evidence}
     identity = _probed_identity(dataset_name, dataset_id, dataset_version, manifest, config)
     pool = inference_client if isinstance(inference_client, InferenceClientPool) else InferenceClientPool(config=config, injected_client=inference_client)
+    pool.set_lineage(dataset_id=dataset_id, dataset_version=dataset_version, run_id=job_id, job_id=job_id, recipe="knowledge-unit-probed-qa", data_classification=config.data_classification)
     calls: list[dict[str, Any]] = []
     rejections = _read_jsonl(dataset_store, keys["rejections"])
 
@@ -162,7 +163,7 @@ def _build_knowledge_unit_probed(*, manifest: dict[str, Any], dataset_name: str,
                 raw = discovery.ask_budgeted("Discover knowledge units from this evidence:\n" + item.text, "Return JSON with knowledge_units.", context_limit=config.context_limit_tokens, role="knowledge_unit", prompt_version=config.prompt_versions.get("knowledge_unit", "1.0"), evidence_ids=[item.evidence_id], calls=calls)
                 units.extend(parse_knowledge_units(raw, item.evidence_id, discovery.config.model, config.prompt_versions.get("knowledge_unit", "1.0")))
             except (TokenBudgetError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
-                rejections.append({"stage": "discovery", "evidence_ids": [item.evidence_id], "reason": "model_rejection", "error": str(exc)})
+                rejections.append({"stage": "discovery", "evidence_ids": [item.evidence_id], "reason": normalized_error_category(exc), "error": str(exc)})
         for unit in units:
             cited = [evidence_by_id[eid] for eid in unit.source_evidence_ids if eid in evidence_by_id]
             for index in range(max(0, config.probes_per_unit)):
@@ -199,7 +200,7 @@ def _build_knowledge_unit_probed(*, manifest: dict[str, Any], dataset_name: str,
                 response_id = deterministic_id(probe["probe_id"], "student-response")
                 responses.append({"student_response_id": response_id, "probe_id": probe["probe_id"], "knowledge_unit_id": probe["knowledge_unit_id"], "response": raw, "student_model": asdict(student.config), "model_role": "student", "prompt_version": config.prompt_versions.get("student_probe", "2.0"), "request_metadata": dict(calls[-1]), "source_asset_ids": probe["source_asset_ids"], "document_ids": probe["document_ids"], "evidence_ids": probe["evidence_ids"]})
             except (TokenBudgetError, RuntimeError) as exc:
-                rejections.append({**probe, "stage": "student", "reason": "model_rejection", "error": str(exc)})
+                rejections.append({**probe, "stage": "student", "reason": normalized_error_category(exc), "error": str(exc)})
         dataset_store.put_bytes(keys["student-responses"], _jsonl(responses), media_type="application/x-ndjson")
         checkpoint("student", [keys["student-responses"]], len(responses))
     jobs.append_event(job_id, "stage_completed", {"stage": "student", "row_count": len(responses)})
@@ -224,13 +225,13 @@ def _build_knowledge_unit_probed(*, manifest: dict[str, Any], dataset_name: str,
                 if probe_class not in {"known", "partial", "unknown", "invalid_probe"}:
                     raise ValueError("Unsupported probe class")
                 judgment_id = deterministic_id(probe["probe_id"], "judgment")
-                judgment = {"probe_judgment_id": judgment_id, "probe_id": probe["probe_id"], "student_response_id": response["student_response_id"], "student_model": response["student_model"], "knowledge_unit_id": unit.knowledge_unit_id, "probe_class": probe_class, "reasons": data.get("reasons", {}), "reference_answer": data["reference_answer"], "model_role": "probe_judge", "model": asdict(judge.config), "prompt_version": config.prompt_versions.get("validation", "1.0"), "request_metadata": dict(calls[-1]), "source_asset_ids": probe["source_asset_ids"], "document_ids": probe["document_ids"], "evidence_ids": probe["evidence_ids"]}
+                judgment = {"probe_judgment_id": judgment_id, "probe_id": probe["probe_id"], "student_response_id": response["student_response_id"], "student_model": response["student_model"], "knowledge_unit_id": unit.knowledge_unit_id, "probe_class": probe_class, "reasons": data.get("reasons", {}), "reference_answer": data["reference_answer"], "model_role": "probe_judge", "model": asdict(judge.config), "prompt_version": config.prompt_versions.get("probe_judgment", "2.0"), "request_metadata": dict(calls[-1]), "source_asset_ids": probe["source_asset_ids"], "document_ids": probe["document_ids"], "evidence_ids": probe["evidence_ids"]}
                 judgments.append(judgment)
                 include = probe_class in config.include_classes or (probe_class == "known" and config.known_sample_rate > 0 and int(judgment_id[:8], 16) / 0xFFFFFFFF < config.known_sample_rate)
                 if include and probe_class != "invalid_probe":
                     selected.append({**judgment, "selection_reason": "configured_probe_class"})
             except (TokenBudgetError, json.JSONDecodeError, KeyError, TypeError, ValueError, RuntimeError) as exc:
-                rejections.append({**response, "stage": "judgment", "reason": "model_rejection", "error": str(exc)})
+                rejections.append({**response, "stage": "judgment", "reason": normalized_error_category(exc), "error": str(exc)})
         dataset_store.put_bytes(keys["probe-judgments"], _jsonl(judgments), media_type="application/x-ndjson")
         dataset_store.put_bytes(keys["selected-units"], _jsonl(selected), media_type="application/x-ndjson")
         checkpoint("judgment", [keys["probe-judgments"]], len(judgments))
@@ -254,7 +255,7 @@ def _build_knowledge_unit_probed(*, manifest: dict[str, Any], dataset_name: str,
                 qa_data = _probed_json(qa_raw, required=("instruction", "answer"))
                 candidates.append({**selected_item, "instruction": qa_data["instruction"], "answer": qa_data["answer"], "model_role": "qa_generator", "model": asdict(qa.config), "prompt_version": config.prompt_versions.get("probed_qa_generation", "2.0"), "request_metadata": dict(calls[-1])})
             except (TokenBudgetError, json.JSONDecodeError, KeyError, TypeError, ValueError, RuntimeError) as exc:
-                rejections.append({**selected_item, "stage": "qa_generation", "reason": "model_rejection", "error": str(exc)})
+                rejections.append({**selected_item, "stage": "qa_generation", "reason": normalized_error_category(exc), "error": str(exc)})
         dataset_store.put_bytes(keys["candidates"], _jsonl(candidates), media_type="application/x-ndjson")
         checkpoint("qa_generation", [keys["candidates"]], len(candidates))
     jobs.append_event(job_id, "stage_completed", {"stage": "qa_generation", "row_count": len(candidates)})
@@ -267,16 +268,18 @@ def _build_knowledge_unit_probed(*, manifest: dict[str, Any], dataset_name: str,
             try:
                 unit = next(unit for unit in units if unit.knowledge_unit_id == candidate["knowledge_unit_id"])
                 cited = "\n".join(evidence_by_id[eid].text for eid in unit.source_evidence_ids if eid in evidence_by_id)
-                validation_material = f"{prompt_dir.joinpath('v2_probed_qa_validation.txt').read_text(encoding='utf-8')}\nEVIDENCE:\n{cited}\nKNOWLEDGE UNIT:\n{unit.canonical_statement}\nPROBE JUDGMENT:\n{json.dumps(candidate, sort_keys=True)}\nCANDIDATE:\n{json.dumps(candidate, sort_keys=True)}"
+                judgment = {key: candidate[key] for key in ("probe_judgment_id", "probe_id", "student_response_id", "student_model", "knowledge_unit_id", "probe_class", "reasons", "reference_answer") if key in candidate}
+                probe = next(probe for probe in probes if probe["probe_id"] == candidate["probe_id"])
+                validation_material = f"{prompt_dir.joinpath('v2_probed_qa_validation.txt').read_text(encoding='utf-8')}\nORIGINAL EVIDENCE:\n{cited}\nKNOWLEDGE UNIT:\n{unit.canonical_statement}\nPROBE QUESTION:\n{probe['question']}\nSTUDENT RESPONSE:\n{next(item['response'] for item in responses if item['student_response_id'] == candidate['student_response_id'])}\nPROBE JUDGMENT:\n{json.dumps(judgment, sort_keys=True)}\nCANDIDATE:\n{json.dumps({'instruction': candidate['instruction'], 'answer': candidate['answer']}, sort_keys=True)}"
                 raw = validator.ask_budgeted(validation_material, "Return JSON with decision accept or reject and reasons.", context_limit=config.context_limit_tokens, role="validator", prompt_version=config.prompt_versions.get("probed_qa_validation", "2.0"), evidence_ids=list(candidate["evidence_ids"]), calls=calls)
                 data = _probed_json(raw, required=("decision",))
                 if data["decision"] not in {"accept", "reject"}:
                     raise ValueError("Validator decision must be accept or reject")
-                validations.append({**candidate, "decision": data["decision"], "reasons": data.get("reasons", {}), "validation_model": asdict(validator.config), "validation_prompt_version": config.prompt_versions.get("validation", "1.0"), "validation_request_metadata": dict(calls[-1])})
+                validations.append({**candidate, "decision": data["decision"], "reasons": data.get("reasons", {}), "validation_model": asdict(validator.config), "validation_prompt_version": config.prompt_versions.get("probed_qa_validation", "2.0"), "validation_request_metadata": dict(calls[-1])})
                 if data["decision"] == "reject":
                     rejections.append({**candidate, "stage": "validation", "reason": "validation_rejected"})
             except (TokenBudgetError, json.JSONDecodeError, KeyError, TypeError, ValueError, RuntimeError) as exc:
-                rejections.append({**candidate, "stage": "validation", "reason": "model_rejection", "error": str(exc)})
+                rejections.append({**candidate, "stage": "validation", "reason": normalized_error_category(exc), "error": str(exc)})
         dataset_store.put_bytes(keys["validations"], _jsonl(validations), media_type="application/x-ndjson")
         checkpoint("validation", [keys["validations"]], len(validations))
     jobs.append_event(job_id, "stage_completed", {"stage": "validation", "row_count": len(validations)})
