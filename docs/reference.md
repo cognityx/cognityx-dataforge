@@ -117,6 +117,23 @@ model = "Qwen/Qwen3-8B"
 server_profile = "qwen3-8b-int4"
 ```
 
+Only `local` is treated as a local inference provider. External providers are
+generic and must be explicitly enabled and allowlisted:
+
+```toml
+[external_inference]
+enabled = false
+allowed_providers = []
+
+[data]
+classification = "internal"
+permit_external_sensitive_data = false
+```
+
+The older `[commercial].enabled = true` setting remains accepted for
+backward compatibility. DataForge performs provider status and capability
+preflight without automatically calling provider test endpoints.
+
 Artifacts include `probes.jsonl`, `student-responses.jsonl`,
 `probe-judgments.jsonl`, `selected-units.jsonl`, and the normal candidate,
 validation, rejection, and record files. The stages are checkpointed as

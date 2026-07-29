@@ -1,0 +1,2 @@
+Create a source-grounded instruction and answer from the supplied evidence and knowledge unit.
+Return JSON with `instruction` and `answer`.

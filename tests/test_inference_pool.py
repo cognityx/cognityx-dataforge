@@ -18,6 +18,12 @@ class Client:
             "cognityx": {"token_budget": {"effective_max_output_tokens": 8}, "extensions": {"rate_limits": {"remaining": "9"}}},
         }
 
+    def provider_status(self):
+        return [{"provider": "gemini", "configured": True}]
+
+    def provider_capabilities(self, provider, model):
+        return {"structured_output": True, "model_discovery": False}
+
 
 def settings(enabled=False):
     return SimpleNamespace(base_url="http://gateway", manager_url="http://manager", auto_start_local=True, startup_timeout_seconds=5, commercial_enabled=enabled)
@@ -51,3 +57,14 @@ def test_commercial_role_can_route_without_local_fields():
     StructuredAdapter(pool, GeneratorConfig(model="m", provider="openai")).ask("x", "s")
     assert client.calls[0]["provider"] == "openai"
     assert "backend" not in client.calls[0]
+
+
+def test_arbitrary_external_provider_is_preflighted_and_uses_supported_parameters():
+    client = Client()
+    pool = InferenceClientPool(config=SimpleNamespace(base_url="http://gateway", manager_url=None, auto_start_local=False, startup_timeout_seconds=5, external_enabled=True, allowed_providers=("gemini",), commercial_enabled=False), injected_client=client)
+    calls = []
+    StructuredAdapter(pool, GeneratorConfig(model="gemini-pro", provider="gemini", max_output_tokens=12)).ask_budgeted("x", "s", context_limit=None, role="judge", prompt_version="2", evidence_ids=[], calls=calls)
+    assert client.calls[0]["provider"] == "gemini"
+    assert client.calls[0]["max_output_tokens"] == 12
+    assert "max_tokens" not in client.calls[0]
+    assert client.calls[0]["response_format"] == {"type": "json_object"}

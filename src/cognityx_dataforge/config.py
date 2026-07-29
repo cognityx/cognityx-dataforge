@@ -34,13 +34,17 @@ class DataForgeConfig:
     auto_start_local: bool = False
     startup_timeout_seconds: float = 600.0
     commercial_enabled: bool = False
+    external_enabled: bool = False
+    allowed_providers: tuple[str, ...] = ()
+    data_classification: str = "internal"
+    permit_external_sensitive_data: bool = False
     probes_per_unit: int = 2
     include_classes: tuple[str, ...] = ("partial", "unknown")
     known_sample_rate: float = 0.0
 
     def __post_init__(self) -> None:
         if self.prompt_versions is None:
-            object.__setattr__(self, "prompt_versions", {"generation": "1.0", "knowledge_unit": "1.0", "validation": "1.0"})
+            object.__setattr__(self, "prompt_versions", {"generation": "1.0", "knowledge_unit": "1.0", "validation": "1.0", "probe_generation": "2.0", "student_probe": "2.0", "probe_judgment": "2.0", "probed_qa_generation": "2.0", "probed_qa_validation": "2.0"})
 
     @property
     def prompt_version(self) -> str:
@@ -75,6 +79,12 @@ class DataForgeConfig:
         prompt_versions = payload.get("prompt_versions")
         if not prompt_versions:
             prompt_versions = {"generation": str(payload.get("prompt_version", "1.0")), "knowledge_unit": "1.0", "validation": "1.0"}
+        prompt_versions = dict(prompt_versions)
+        prompt_versions.setdefault("probe_generation", "2.0")
+        prompt_versions.setdefault("student_probe", "2.0")
+        prompt_versions.setdefault("probe_judgment", "2.0")
+        prompt_versions.setdefault("probed_qa_generation", "2.0")
+        prompt_versions.setdefault("probed_qa_validation", "2.0")
         return cls(
             generator=GeneratorModelConfig(
                 model=str(generator["model"]),
@@ -97,6 +107,10 @@ class DataForgeConfig:
             auto_start_local=bool(payload.get("inference", {}).get("auto_start_local", False)),
             startup_timeout_seconds=float(payload.get("inference", {}).get("startup_timeout_seconds", 600)),
             commercial_enabled=bool(payload.get("commercial", {}).get("enabled", False)),
+            external_enabled=bool(payload.get("external_inference", {}).get("enabled", False)) or bool(payload.get("commercial", {}).get("enabled", False)),
+            allowed_providers=tuple(str(item) for item in payload.get("external_inference", {}).get("allowed_providers", ())),
+            data_classification=str(payload.get("data", {}).get("classification", "internal")),
+            permit_external_sensitive_data=bool(payload.get("data", {}).get("permit_external_sensitive_data", False)),
             probes_per_unit=int(probing.get("probes_per_unit", 2)),
             include_classes=tuple(str(item) for item in probing.get("include_classes", ("partial", "unknown"))),
             known_sample_rate=float(probing.get("known_sample_rate", 0.0)),

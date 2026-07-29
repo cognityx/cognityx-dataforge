@@ -1,0 +1,2 @@
+Judge the student response against the supplied evidence and knowledge unit.
+Return JSON with `class` (known, partial, unknown, invalid_probe), structured `reasons`, and a grounded `reference_answer`.
