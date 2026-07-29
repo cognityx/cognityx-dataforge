@@ -168,6 +168,7 @@ def test_recipe_aliases_and_legacy_manifest_readability():
     assert normalize_recipe("v0") == "paragraph-qa"
     assert normalize_recipe("v1") == "knowledge-unit-qa"
     assert normalize_recipe(variant="v0") == "paragraph-qa"
+    assert normalize_recipe("knowledge-unit-probed-qa") == "knowledge-unit-probed-qa"
 
 
 def test_knowledge_unit_recipe_discovers_validates_and_rejects(tmp_path: Path):

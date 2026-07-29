@@ -87,6 +87,42 @@ max_output_tokens = 512
 
 When the first two roles are absent, they fall back to `[models.generator]`.
 
+## Knowledge-unit probed QA
+
+```bash
+cognityx-dataforge build \
+  --input-manifest <run-manifest-uri> \
+  --dataset-name research-probed \
+  --recipe knowledge-unit-probed-qa \
+  --config dataforge-probing.toml \
+  --storage-root /tmp/cognityx-storage
+```
+
+This research recipe generates diagnostic probes for each knowledge unit,
+asks the configured untrained student without evidence or target answers,
+judges the response using the original evidence, and generates QA only for
+selected `partial` and `unknown` judgments by default. `known` and
+`invalid_probe` results remain in the probe artifacts and are not silently
+deleted.
+
+```toml
+[probing]
+probes_per_unit = 2
+include_classes = ["partial", "unknown"]
+known_sample_rate = 0.0
+
+[models.student]
+provider = "local"
+model = "Qwen/Qwen3-8B"
+server_profile = "qwen3-8b-int4"
+```
+
+Artifacts include `probes.jsonl`, `student-responses.jsonl`,
+`probe-judgments.jsonl`, `selected-units.jsonl`, and the normal candidate,
+validation, rejection, and record files. The stages are checkpointed as
+discovery, student, judgment, validation, and finalization. Student requests
+are stateless and contain only the generated probe question.
+
 ## Python API
 
 ```python
