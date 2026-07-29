@@ -24,6 +24,9 @@ class DataForgeConfig:
     knowledge_unit: GeneratorModelConfig | None = None
     qa_generator: GeneratorModelConfig | None = None
     validator: ValidatorModelConfig | None = None
+    probe_generator: GeneratorModelConfig | None = None
+    student: GeneratorModelConfig | None = None
+    probe_judge: GeneratorModelConfig | None = None
     prompt_versions: dict[str, str] = None  # type: ignore[assignment]
     context_limit_tokens: int | None = None
     base_url: str | None = None
@@ -31,6 +34,9 @@ class DataForgeConfig:
     auto_start_local: bool = False
     startup_timeout_seconds: float = 600.0
     commercial_enabled: bool = False
+    probes_per_unit: int = 2
+    include_classes: tuple[str, ...] = ("partial", "unknown")
+    known_sample_rate: float = 0.0
 
     def __post_init__(self) -> None:
         if self.prompt_versions is None:
@@ -62,6 +68,10 @@ class DataForgeConfig:
         validator = None
         if validator_payload:
             validator = role_config(validator_payload)
+        probe_generator = role_config(models.get("probe_generator") or models.get("qa_generator") or generator)
+        student = role_config(models.get("student") or generator)
+        probe_judge = role_config(models.get("probe_judge") or models.get("validator") or generator)
+        probing = payload.get("probing", {})
         prompt_versions = payload.get("prompt_versions")
         if not prompt_versions:
             prompt_versions = {"generation": str(payload.get("prompt_version", "1.0")), "knowledge_unit": "1.0", "validation": "1.0"}
@@ -77,6 +87,9 @@ class DataForgeConfig:
             knowledge_unit=knowledge_unit,
             qa_generator=qa_generator,
             validator=validator,
+            probe_generator=probe_generator,
+            student=student,
+            probe_judge=probe_judge,
             prompt_versions={str(key): str(value) for key, value in prompt_versions.items()},
             context_limit_tokens=(int(payload.get("context_limit_tokens")) if payload.get("context_limit_tokens") is not None else None),
             base_url=(str(payload["inference"]["base_url"]) if payload.get("inference", {}).get("base_url") is not None else None),
@@ -84,4 +97,7 @@ class DataForgeConfig:
             auto_start_local=bool(payload.get("inference", {}).get("auto_start_local", False)),
             startup_timeout_seconds=float(payload.get("inference", {}).get("startup_timeout_seconds", 600)),
             commercial_enabled=bool(payload.get("commercial", {}).get("enabled", False)),
+            probes_per_unit=int(probing.get("probes_per_unit", 2)),
+            include_classes=tuple(str(item) for item in probing.get("include_classes", ("partial", "unknown"))),
+            known_sample_rate=float(probing.get("known_sample_rate", 0.0)),
         )
