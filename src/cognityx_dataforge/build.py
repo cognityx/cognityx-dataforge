@@ -18,7 +18,7 @@ from cognityx_dataforge.evidence import (
     load_run_manifest,
     validate_context,
 )
-from cognityx_dataforge.inference import GeneratorAdapter, GeneratorConfig, load_inference_client
+from cognityx_dataforge.inference import GeneratorAdapter, GeneratorConfig, StructuredAdapter, TokenBudgetError, load_inference_client
 from cognityx_dataforge.inference import StructuredAdapter
 from cognityx_dataforge.knowledge import KnowledgeUnit, parse_knowledge_units
 from cognityx_dataforge.models import DatasetRecord
@@ -60,6 +60,86 @@ _store_for_uri = resolve_storage_uri
 
 def _jsonl(rows: list[dict[str, Any]]) -> bytes:
     return b"".join(json.dumps(row, sort_keys=True, ensure_ascii=False).encode() + b"\n" for row in rows)
+
+
+def _read_jsonl(store: Any, key: str) -> list[dict[str, Any]]:
+    if not store.exists(key):
+        return []
+    with store.open(key) as handle:
+        return [json.loads(line) for line in handle.read().decode().splitlines() if line.strip()]
+
+
+def _build_knowledge_unit_staged(*, manifest: dict[str, Any], config: DataForgeConfig, runtime: StorageRuntime, jobs: JobRepository, inference_client: Any, dataset_store: Any, dataset_root: str, dataset_id: str, dataset_version: str, input_manifest_uri: str, job_id: str) -> dict[str, Any]:
+    prompt_dir = Path(__file__).with_name("prompts")
+    knowledge_key = f"{dataset_root}/knowledge-units.jsonl"
+    candidates_key = f"{dataset_root}/candidates.jsonl"
+    validations_key = f"{dataset_root}/validations.jsonl"
+    records_key = f"{dataset_root}/records.jsonl"
+    rejections_key = f"{dataset_root}/rejections.jsonl"
+    calls: list[dict[str, Any]] = []
+    rejections = _read_jsonl(dataset_store, rejections_key)
+    evidence_groups = []
+    for ref in manifest["evidence_refs"]:
+        evidence_store, evidence_key = resolve_storage_uri(runtime, ref)
+        with evidence_store.open(evidence_key) as handle:
+            evidence_groups.extend(load_evidence_jsonl(handle))
+    evidence = combine_evidence([tuple(evidence_groups)])
+    validate_context(manifest, evidence)
+    evidence_availability(evidence)
+    discovery = StructuredAdapter(inference_client, GeneratorConfig(**asdict(config.knowledge_unit or config.generator)))
+    units = [KnowledgeUnit.from_dict(item) for item in _read_jsonl(dataset_store, knowledge_key)]
+    if not units:
+        for item in evidence:
+            prompt = prompt_dir.joinpath("v1_knowledge_unit_discovery.txt").read_text(encoding="utf-8") + "\n\n" + item.text
+            try:
+                raw = discovery.ask_budgeted(prompt, "Return strict JSON for knowledge-unit discovery.", context_limit=config.context_limit_tokens, role="knowledge_unit", prompt_version=config.prompt_versions["knowledge_unit"], evidence_ids=[item.evidence_id], calls=calls)
+                units.extend(parse_knowledge_units(raw, item.evidence_id, discovery.config.model, config.prompt_versions["knowledge_unit"]))
+            except TokenBudgetError as exc:
+                rejections.append({"stage": "discovery", "evidence_ids": [item.evidence_id], "reason": "token_budget_exceeded", "input_tokens": exc.input_tokens, "max_output_tokens": exc.max_output_tokens, "context_limit": exc.context_limit})
+        dataset_store.put_bytes(knowledge_key, _jsonl([unit.to_dict() for unit in units]), media_type="application/x-ndjson")
+        dataset_store.put_bytes(f"{dataset_root}/model-calls-discovery.jsonl", _jsonl(calls), media_type="application/x-ndjson")
+    qa = StructuredAdapter(inference_client, GeneratorConfig(**asdict(config.qa_generator or config.generator)))
+    candidates = _read_jsonl(dataset_store, candidates_key)
+    if not candidates and units:
+        for unit in units:
+            prompt = prompt_dir.joinpath("v1_knowledge_unit_generation.txt").read_text(encoding="utf-8") + "\n\n" + json.dumps(unit.to_dict(), sort_keys=True)
+            try:
+                raw = qa.ask_budgeted(prompt, "Return strict JSON with instruction and answer.", context_limit=config.context_limit_tokens, role="qa_generator", prompt_version=config.prompt_versions["generation"], evidence_ids=list(unit.source_evidence_ids), calls=calls)
+                data = json.loads(raw)
+                candidates.append({"knowledge_unit_id": unit.knowledge_unit_id, "evidence_ids": list(unit.source_evidence_ids), "instruction": str(data["instruction"]).strip(), "answer": str(data["answer"]).strip()})
+            except TokenBudgetError as exc:
+                rejections.append({"stage": "generation", "knowledge_unit_id": unit.knowledge_unit_id, "reason": "token_budget_exceeded", "input_tokens": exc.input_tokens, "max_output_tokens": exc.max_output_tokens, "context_limit": exc.context_limit})
+        dataset_store.put_bytes(candidates_key, _jsonl(candidates), media_type="application/x-ndjson")
+        dataset_store.put_bytes(f"{dataset_root}/model-calls-generation.jsonl", _jsonl(calls), media_type="application/x-ndjson")
+    validator = StructuredAdapter(inference_client, GeneratorConfig(**asdict(config.validator or config.generator)))
+    validations = _read_jsonl(dataset_store, validations_key)
+    if not validations and candidates:
+        by_id = {unit.knowledge_unit_id: unit for unit in units}
+        for candidate in candidates:
+            unit = by_id[candidate["knowledge_unit_id"]]
+            prompt = prompt_dir.joinpath("v1_knowledge_unit_validation.txt").read_text(encoding="utf-8") + "\n\n" + json.dumps(candidate, sort_keys=True) + "\n\n" + json.dumps(unit.to_dict(), sort_keys=True)
+            try:
+                raw = validator.ask_budgeted(prompt, "Return accept or reject with reasons.", context_limit=config.context_limit_tokens, role="validator", prompt_version=config.prompt_versions["validation"], evidence_ids=list(unit.source_evidence_ids), calls=calls)
+                data = json.loads(raw)
+                decision = data.get("decision")
+                if decision not in {"accept", "reject"}:
+                    raise ValueError("Validator decision must be accept or reject")
+                validations.append({"knowledge_unit_id": unit.knowledge_unit_id, "evidence_ids": list(unit.source_evidence_ids), "decision": decision, "reasons": data.get("reasons", {})})
+                if decision == "reject":
+                    rejections.append({**candidate, "stage": "validation", "reason": data.get("reasons", {})})
+            except TokenBudgetError as exc:
+                rejections.append({**candidate, "stage": "validation", "reason": "token_budget_exceeded", "input_tokens": exc.input_tokens, "max_output_tokens": exc.max_output_tokens, "context_limit": exc.context_limit})
+        dataset_store.put_bytes(validations_key, _jsonl(validations), media_type="application/x-ndjson")
+        dataset_store.put_bytes(f"{dataset_root}/model-calls-validation.jsonl", _jsonl(calls), media_type="application/x-ndjson")
+    accepted = {item["knowledge_unit_id"] for item in validations if item.get("decision") == "accept"}
+    records = [{"record_id": deterministic_id(dataset_id, item["knowledge_unit_id"], item["instruction"], item["answer"]), "messages": [{"role": "user", "content": item["instruction"]}, {"role": "assistant", "content": item["answer"]}], "split": split_for_index(index), "metadata": {"recipe": "knowledge-unit-qa", "evidence_ids": item["evidence_ids"], "knowledge_unit_id": item["knowledge_unit_id"], "prompt_versions": dict(config.prompt_versions), "generator_model": (config.qa_generator or config.generator).model}} for index, item in enumerate(candidates) if item["knowledge_unit_id"] in accepted]
+    dataset_store.put_bytes(records_key, _jsonl(records), media_type="application/x-ndjson")
+    dataset_store.put_bytes(rejections_key, _jsonl(rejections), media_type="application/x-ndjson")
+    manifest_payload = {"dataset_id": dataset_id, "dataset_name": manifest.get("dataset_name", dataset_id), "recipe": "knowledge-unit-qa", "dataset_version": dataset_version, "schema_version": "cognityx.dataforge.dataset/v1", "source_manifest_uri": input_manifest_uri, "source_manifest_checksum": checksum(manifest), "configuration_checksum": checksum(asdict(config)), "prompt_versions": dict(config.prompt_versions), "knowledge_unit_count": len(units), "candidate_count": len(candidates), "accepted_count": len(records), "rejected_count": len(rejections), "knowledge_units_uri": dataset_store.uri(knowledge_key), "knowledge_units_checksum": checksum(_jsonl([unit.to_dict() for unit in units]).decode()), "validations_uri": dataset_store.uri(validations_key), "validations_checksum": checksum(_jsonl(validations).decode()), "records_uri": dataset_store.uri(records_key), "records_checksum": checksum(_jsonl(records).decode()), "run_id": job_id, "job_id": job_id, "model_calls_uri": dataset_store.uri(f"{dataset_root}/model-calls-validation.jsonl")}
+    dataset_store.put_json_idempotent(f"{dataset_root}/manifest.json", manifest_payload)
+    jobs.append_event(job_id, "build_completed", {"record_count": len(records), "dataset_id": dataset_id})
+    jobs.set_state(job_id, "completed")
+    return {"run_id": job_id, "job_id": job_id, "dataset_id": dataset_id, "recipe": "knowledge-unit-qa", "record_count": len(records), "dataset_manifest_uri": dataset_store.uri(f"{dataset_root}/manifest.json")}
 
 
 def build_dataset(
@@ -119,6 +199,14 @@ def build_dataset(
     )
     jobs.set_state(job.job_id, "running")
     jobs.append_event(job.job_id, "build_started", {"run_id": manifest["run_id"]})
+    if recipe == "knowledge-unit-qa":
+        return _build_knowledge_unit_staged(
+            manifest=manifest, config=config, runtime=runtime, jobs=jobs,
+            inference_client=inference_client or load_inference_client(),
+            dataset_store=dataset_store, dataset_root=dataset_root,
+            dataset_id=dataset_id, dataset_version=dataset_version,
+            input_manifest_uri=input_manifest_uri, job_id=job.job_id,
+        )
     try:
         evidence_groups = []
         for evidence_ref in manifest["evidence_refs"]:

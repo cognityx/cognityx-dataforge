@@ -22,6 +22,9 @@ class FakeClient:
         self.calls += 1
         return {"choices": [{"message": {"content": json.dumps({"instruction": "Ask", "answer": "Answer"})}}]}
 
+    def count_input_tokens(self, **kwargs):
+        return {"input_tokens": len(kwargs["messages"][-1]["content"].split()), "context_limit": 256}
+
 
 class KnowledgeFakeClient(FakeClient):
     validations = 0
@@ -32,7 +35,7 @@ class KnowledgeFakeClient(FakeClient):
         if "Validate the instruction-answer" in prompt:
             self.validations += 1
             payload = {"decision": "reject" if self.validations == 2 else "accept", "reasons": {"factual_support": "checked"}}
-        elif "knowledge-unit" in prompt or "coherent fact" in prompt:
+        elif "Discover every" in prompt or "knowledge_units array" in prompt:
             payload = {"knowledge_units": [
                 {"canonical_statement": "A rule applies", "supporting_facts": ["A rule applies"], "concepts": ["rule"]},
                 {"canonical_statement": "A second fact applies", "supporting_facts": ["A second fact applies"], "concepts": ["fact"]},
@@ -54,9 +57,11 @@ def config_file(tmp_path: Path) -> Path:
 def knowledge_config_file(tmp_path: Path) -> Path:
     config = tmp_path / "knowledge-config.toml"
     config.write_text(
+        'context_limit_tokens=256\n'
         '[models.generator]\nmodel="fake-generator"\nbackend="fake"\nprofile="test"\nmax_output_tokens=32\n'
         '[models.validator]\nmodel="fake-validator"\nbackend="fake"\nprofile="test"\nmax_output_tokens=32\n'
-        '[prompt_versions]\nknowledge_unit="1.0"\ngeneration="1.0"\nvalidation="1.0"\n',
+        '[prompt_versions]\nknowledge_unit="1.0"\ngeneration="1.0"\nvalidation="1.0"\n'
+        ,
         encoding="utf-8",
     )
     return config
@@ -181,6 +186,23 @@ def test_knowledge_unit_recipe_discovers_validates_and_rejects(tmp_path: Path):
     assert payload["knowledge_unit_count"] == 2
     assert payload["accepted_count"] == 1
     assert payload["rejected_count"] == 1
+
+
+def test_knowledge_unit_budget_rejection_is_structured(tmp_path: Path):
+    runtime = StorageRuntime.from_config(StorageConfig.built_in(root=tmp_path / "storage"))
+    artifacts = runtime.for_role("artifact")
+    evidence = {"evidence_id": "e1", "document_id": "doc-1", "page_number": 1, "text": "oversized evidence", "char_start": 0, "char_end": 18, "context_id": "ctx-1", "run_id": "run-budget"}
+    evidence_uri = artifacts.put_bytes("ingest/documents/doc-1/evidence.jsonl", (json.dumps(evidence) + "\n").encode(), media_type="application/x-ndjson").uri
+    manifest_uri = artifacts.put_json("ingest/runs/run-budget/manifest.json", {"schema": "cognityx.ingest.run", "run_id": "run-budget", "context_id": "ctx-1", "document_ids": ["doc-1"], "evidence_refs": [evidence_uri]}).uri
+    config = knowledge_config_file(tmp_path)
+    config.write_text(config.read_text(encoding="utf-8").replace("context_limit_tokens=256", "context_limit_tokens=1"), encoding="utf-8")
+    result = build_dataset(manifest_uri, "budget", "knowledge-unit-qa", config, runtime=runtime, inference_client=KnowledgeFakeClient())
+    dataset = runtime.for_role("dataset")
+    version = result["dataset_manifest_uri"].rsplit("/", 2)[-2]
+    with dataset.open(f"{result['dataset_id']}/{version}/rejections.jsonl") as handle:
+        rejection = json.loads(handle.readline())
+    assert rejection["reason"] == "token_budget_exceeded"
+    assert "input_tokens" in rejection
 
 
 def test_real_ingest_to_dataforge_export(tmp_path: Path):

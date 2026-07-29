@@ -30,6 +30,22 @@ class KnowledgeUnit:
             value[key] = list(value[key])
         return value
 
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "KnowledgeUnit":
+        return cls(
+            knowledge_unit_id=str(value["knowledge_unit_id"]),
+            source_evidence_ids=tuple(value.get("source_evidence_ids", [])),
+            canonical_statement=str(value["canonical_statement"]),
+            supporting_facts=tuple(value.get("supporting_facts", [])),
+            concepts=tuple(value.get("concepts", [])),
+            prerequisites=tuple(value.get("prerequisites", [])),
+            difficulty=str(value.get("difficulty", "unknown")),
+            ambiguity_flags=tuple(value.get("ambiguity_flags", [])),
+            generator_model=str(value["generator_model"]),
+            prompt_version=str(value["prompt_version"]),
+            schema_version=str(value.get("schema_version", KNOWLEDGE_UNIT_SCHEMA_VERSION)),
+        )
+
 
 def parse_knowledge_units(payload: str, evidence_id: str, model: str, prompt_version: str) -> tuple[KnowledgeUnit, ...]:
     data = json.loads(payload)

@@ -48,6 +48,40 @@ against the cited evidence. It writes `knowledge-units.jsonl`,
 `validations.jsonl`, and `rejections.jsonl`; rejected records are excluded
 from `records.jsonl`.
 
+Knowledge-unit QA runs in three resumable stages: discovery, QA generation,
+then validation. Each model request is stateless and includes its complete
+material for that request. Configure `context_limit_tokens` at the TOML root;
+DataForge calls `count_input_tokens` before every request and records the role,
+model settings, token budget, prompt version, and evidence IDs. Requests that
+would exceed the budget are rejected with structured reasons rather than
+silently truncated.
+
+The model roles may be configured independently:
+
+```toml
+context_limit_tokens = 32768
+
+[models.knowledge_unit]
+model = "Qwen/Qwen3-32B"
+backend = "vllm"
+profile = "int4"
+max_output_tokens = 2048
+
+[models.qa_generator]
+model = "Qwen/Qwen3-32B"
+backend = "vllm"
+profile = "int4"
+max_output_tokens = 1024
+
+[models.validator]
+model = "Qwen/Qwen3-14B"
+backend = "vllm"
+profile = "int4"
+max_output_tokens = 512
+```
+
+When the first two roles are absent, they fall back to `[models.generator]`.
+
 ## Python API
 
 ```python

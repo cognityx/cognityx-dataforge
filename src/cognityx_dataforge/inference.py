@@ -5,6 +5,14 @@ from dataclasses import dataclass
 from typing import Any
 
 
+class TokenBudgetError(ValueError):
+    def __init__(self, message: str, *, input_tokens: int, max_output_tokens: int, context_limit: int):
+        super().__init__(message)
+        self.input_tokens = input_tokens
+        self.max_output_tokens = max_output_tokens
+        self.context_limit = context_limit
+
+
 @dataclass(frozen=True, slots=True)
 class GeneratorConfig:
     model: str
@@ -66,6 +74,21 @@ class StructuredAdapter:
             max_tokens=self.config.max_output_tokens,
         )
         return response.get("choices", [{}])[0].get("message", {}).get("content", "")
+
+    def ask_budgeted(self, prompt: str, system: str, *, context_limit: int | None, role: str, prompt_version: str, evidence_ids: list[str], calls: list[dict[str, Any]]) -> str:
+        messages = [{"role": "system", "content": system}, {"role": "user", "content": prompt}]
+        counter = getattr(self.client, "count_input_tokens", None)
+        if counter is None:
+            raise RuntimeError("Inference client must provide count_input_tokens for budgeted calls")
+        result = counter(model=self.config.model, backend=self.config.backend, profile=self.config.profile, messages=messages)
+        input_tokens = int(result.get("input_tokens", result if isinstance(result, int) else 0))
+        limit = context_limit or int(result.get("context_limit", 0))
+        if not limit:
+            raise RuntimeError("Configure context_limit_tokens or provide a certified context limit")
+        if input_tokens + self.config.max_output_tokens > limit:
+            raise TokenBudgetError("Model request exceeds context budget", input_tokens=input_tokens, max_output_tokens=self.config.max_output_tokens, context_limit=limit)
+        calls.append({"role": role, "model": self.config.model, "backend": self.config.backend, "profile": self.config.profile, "history_mode": "none", "input_tokens": input_tokens, "max_output_tokens": self.config.max_output_tokens, "prompt_version": prompt_version, "evidence_ids": list(evidence_ids)})
+        return self.ask(prompt, system)
 
 
 def load_inference_client() -> Any:
