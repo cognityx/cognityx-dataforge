@@ -48,3 +48,9 @@ def test_probed_recipe_selects_unknown_and_keeps_student_prompt_evidence_free(tm
     student_calls = [call for call in client.calls if "own knowledge" in call["messages"][0]["content"]]
     assert len(student_calls) == 2
     assert all("Water freezes" not in call["messages"][1]["content"] for call in student_calls)
+    validation_calls = [call for call in client.calls if "decision accept" in call["messages"][0]["content"]]
+    assert validation_calls
+    validation_prompt = validation_calls[0]["messages"][1]["content"]
+    assert all(value in validation_prompt for value in ("ORIGINAL EVIDENCE", "KNOWLEDGE UNIT", "PROBE QUESTION", "STUDENT RESPONSE", "PROBE JUDGMENT", "CANDIDATE"))
+    assert validation_calls[0]["execution_context"]["recipe"] == "knowledge-unit-probed-qa"
+    assert validation_calls[0]["request_metadata"]["history_mode"] == "none"

@@ -15,6 +15,26 @@ class TokenBudgetError(ValueError):
         self.context_limit = context_limit
 
 
+def normalized_error_category(exc: BaseException) -> str:
+    category = getattr(exc, "error_category", None) or getattr(exc, "category", None)
+    if category:
+        return str(category)
+    detail = str(exc).lower()
+    for name, terms in {
+        "authentication_failed": ("credential", "authentication", "api key", "401"),
+        "permission_denied": ("permission", "forbidden", "403"),
+        "rate_limited": ("rate limit", "429", "thrott"),
+        "context_limit_exceeded": ("context", "token limit", "too many tokens"),
+        "model_unavailable": ("model unavailable", "unknown model", "404"),
+        "not_configured": ("not configured", "disabled"),
+        "network_error": ("connection", "network", "timed out"),
+        "unsupported_parameter": ("unsupported parameter", "unsupported"),
+    }.items():
+        if any(term in detail for term in terms):
+            return name
+    return "invalid_response"
+
+
 def normalize_input_token_count(value: int | None) -> int | None:
     if value is None:
         return None
@@ -65,6 +85,10 @@ class InferenceClientPool:
         self.injected_client = injected_client
         self._clients: dict[tuple[Any, ...], Any] = {}
         self._preflight: dict[tuple[Any, ...], dict[str, Any]] = {}
+        self.lineage: dict[str, Any] = {}
+
+    def set_lineage(self, **values: Any) -> None:
+        self.lineage = {key: value for key, value in values.items() if value is not None}
 
     def client_for(self, role: GeneratorConfig) -> Any:
         if role.provider != "local":
@@ -104,23 +128,25 @@ class InferenceClientPool:
     def _inspect_provider(self, client: Any, role: GeneratorConfig) -> dict[str, Any]:
         if role.provider == "local":
             return {"provider": "local", "verification_source": "local-client-configuration", "capabilities": {}}
-        snapshot: dict[str, Any] = {"provider": role.provider, "model": role.model, "verification_source": "provider-capability-endpoints"}
-        for name, args in (("provider_status", ()), ("provider_capabilities", (role.provider, role.model))):
-            method = getattr(client, name, None)
-            if method is None:
-                if self.injected_client is not None:
-                    return {"provider": role.provider, "model": role.model, "verification_source": "injected-client"}
-                raise RuntimeError(f"Inference client does not support required provider preflight: {name}")
-            try:
-                snapshot[name] = method(*args)
-            except Exception as exc:
-                raise RuntimeError(f"Provider preflight failed for '{role.provider}': {exc}") from exc
-        capabilities = snapshot.get("provider_capabilities") or {}
-        if capabilities.get("model_discovery", capabilities.get("models_supported", False)):
-            method = getattr(client, "provider_models", None)
-            if method is not None:
-                snapshot["provider_models"] = method(role.provider)
-        snapshot["parameter_policy"] = capabilities.get("parameters", {})
+        snapshot: dict[str, Any] = {"provider": role.provider, "model": role.model}
+        status_method = getattr(client, "provider_status", None)
+        capability_method = getattr(client, "provider_capabilities", None)
+        if status_method is None or capability_method is None:
+            if self.injected_client is not None:
+                return {**snapshot, "verification_source": "injected-client"}
+            raise RuntimeError("Inference client does not support provider preflight")
+        try:
+            statuses = status_method()
+            status = next((row for row in statuses if row.get("provider") == role.provider), None)
+            if status is None:
+                raise RuntimeError(f"Provider '{role.provider}' is not configured")
+            snapshot["provider_status"] = status
+            if not status.get("enabled") or status.get("configuration_status") not in {"configured", "ready"} or status.get("credential_status") not in {"configured", "not_required"}:
+                raise RuntimeError(f"Provider '{role.provider}' is unavailable: {status.get('configuration_status')}/{status.get('credential_status')}")
+            profile = capability_method(role.provider, role.model)
+            snapshot.update({"profile_state": profile.get("state"), "verification_source": profile.get("verification_source"), "provider_capabilities": profile.get("capabilities", {}), "parameter_policy": profile.get("parameter_policy", {}), "context_limits": profile.get("context"), "account_limits": profile.get("limits")})
+        except Exception as exc:
+            raise RuntimeError(f"Provider preflight failed [{normalized_error_category(exc)}] for '{role.provider}': {exc}") from exc
         return snapshot
 
     def preflight_for(self, role: GeneratorConfig) -> dict[str, Any]:
@@ -155,10 +181,13 @@ class StructuredAdapter:
             kwargs.update(backend=self.config.backend or "vllm", profile=self.config.profile or "bf16")
         if self.config.max_output_tokens is not None:
             kwargs["max_output_tokens"] = self.config.max_output_tokens
-        kwargs["request_metadata"] = {"model_role": role, "prompt_version": prompt_version, "evidence_ids": list(evidence_ids), "history_mode": "none"}
+        kwargs["execution_context"] = dict(self.pool.lineage if self.pool else {})
+        kwargs["request_metadata"] = {**(self.pool.lineage if self.pool else {}), "model_role": role, "prompt_version": prompt_version, "evidence_ids": list(evidence_ids), "history_mode": "none"}
         policy = self._preflight()
         capabilities = policy.get("provider_capabilities", {})
-        if capabilities.get("structured_output", capabilities.get("structured_outputs", False)):
+        parameter_policy = policy.get("parameter_policy", {})
+        supported = set(parameter_policy.get("supported", ()))
+        if capabilities.get("structured_output") is True and (not supported or "response_format" in supported):
             kwargs["response_format"] = {"type": "json_object"}
         try:
             response = self._client().chat(**kwargs)
@@ -166,7 +195,7 @@ class StructuredAdapter:
             detail = str(exc)
             if "context" in detail.lower() or "token" in detail.lower() or getattr(exc, "status", None) == 422:
                 raise TokenBudgetError(detail) from exc
-            raise
+            raise RuntimeError(f"Inference request failed [{normalized_error_category(exc)}]: {exc}") from exc
         if self.config.provider == "local" and context_limit is not None and self.config.max_output_tokens is not None:
             budget = (response.get("cognityx", {}) if isinstance(response, dict) else {}).get("token_budget")
             if budget is None:
@@ -175,7 +204,7 @@ class StructuredAdapter:
                     counted = normalize_input_token_count(counter(model=self.config.model, messages=messages, backend=self.config.backend or "vllm", profile=self.config.profile or "bf16"))
                     if counted is not None and counted + self.config.max_output_tokens > context_limit:
                         raise TokenBudgetError("Model request exceeds context budget", input_tokens=counted, max_output_tokens=self.config.max_output_tokens, context_limit=context_limit)
-        calls.append({**response_metadata(response, self.config, role), "profile_state": policy.get("provider_status", "configured"), "verification_source": policy.get("verification_source"), "capability_snapshot": capabilities, "parameter_policy": policy.get("parameter_policy", {}), "prompt_version": prompt_version, "evidence_ids": list(evidence_ids)})
+        calls.append({**response_metadata(response, self.config, role), "profile_state": policy.get("profile_state", "configured"), "verification_source": policy.get("verification_source"), "capability_snapshot": capabilities, "parameter_policy": parameter_policy, "prompt_version": prompt_version, "evidence_ids": list(evidence_ids)})
         return _content(response)
 
 
