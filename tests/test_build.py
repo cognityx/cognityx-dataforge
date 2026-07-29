@@ -23,7 +23,7 @@ class FakeClient:
         return {"choices": [{"message": {"content": json.dumps({"instruction": "Ask", "answer": "Answer"})}}]}
 
     def count_input_tokens(self, **kwargs):
-        return {"input_tokens": len(kwargs["messages"][-1]["content"].split()), "context_limit": 256}
+        return len(kwargs["messages"][-1]["content"].split())
 
 
 class KnowledgeFakeClient(FakeClient):
@@ -176,7 +176,8 @@ def test_knowledge_unit_recipe_discovers_validates_and_rejects(tmp_path: Path):
     evidence = {"evidence_id": "e1", "document_id": "doc-1", "page_number": 1, "text": "A rule applies. A second fact applies.", "char_start": 0, "char_end": 38, "source_asset_id": "asset-1", "bundle_id": "bundle-1", "context_id": "ctx-1", "sequence_number": 0, "source_sha256": "sha-1", "run_id": "run-ku"}
     evidence_uri = artifacts.put_bytes("ingest/documents/doc-1/evidence.jsonl", (json.dumps(evidence) + "\n").encode(), media_type="application/x-ndjson").uri
     manifest_uri = artifacts.put_json("ingest/runs/run-ku/manifest.json", {"schema": "cognityx.ingest.run", "run_id": "run-ku", "context_id": "ctx-1", "source_assets": [{"asset_id": "asset-1", "sha256": "sha-1"}], "document_ids": ["doc-1"], "evidence_refs": [evidence_uri]}).uri
-    result = build_dataset(manifest_uri, "ku", "knowledge-unit-qa", knowledge_config_file(tmp_path), runtime=runtime, inference_client=KnowledgeFakeClient())
+    fake = KnowledgeFakeClient()
+    result = build_dataset(manifest_uri, "ku", "knowledge-unit-qa", knowledge_config_file(tmp_path), runtime=runtime, inference_client=fake)
     assert result["recipe"] == "knowledge-unit-qa"
     dataset = runtime.for_role("dataset")
     version = result["dataset_manifest_uri"].rsplit("/", 2)[-2]
@@ -186,6 +187,11 @@ def test_knowledge_unit_recipe_discovers_validates_and_rejects(tmp_path: Path):
     assert payload["knowledge_unit_count"] == 2
     assert payload["accepted_count"] == 1
     assert payload["rejected_count"] == 1
+    assert payload["dataset_name"] == "ku"
+    for stage in ("discovery", "generation", "validation", "finalization"):
+        assert dataset.exists(f"{result['dataset_id']}/{version}/checkpoints/{stage}.json")
+    reused = build_dataset(manifest_uri, "ku", "knowledge-unit-qa", knowledge_config_file(tmp_path), runtime=runtime, inference_client=fake)
+    assert reused["reused"] is True
 
 
 def test_knowledge_unit_budget_rejection_is_structured(tmp_path: Path):

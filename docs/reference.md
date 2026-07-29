@@ -56,6 +56,11 @@ model settings, token budget, prompt version, and evidence IDs. Requests that
 would exceed the budget are rejected with structured reasons rather than
 silently truncated.
 
+Each dataset also contains explicit `checkpoints/{discovery,generation,
+validation,finalization}.json` files. Checkpoints include stage identity,
+artifact checksums, completion status, and row counts, so an empty but
+successfully completed stage can resume safely without repeating model calls.
+
 The model roles may be configured independently:
 
 ```toml

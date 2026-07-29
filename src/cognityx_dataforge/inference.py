@@ -13,6 +13,15 @@ class TokenBudgetError(ValueError):
         self.context_limit = context_limit
 
 
+def normalize_input_token_count(value: int | None) -> int | None:
+    """Normalize the Cognityx inference contract without accepting mappings."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError("count_input_tokens() must return int or None")
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class GeneratorConfig:
     model: str
@@ -80,9 +89,11 @@ class StructuredAdapter:
         counter = getattr(self.client, "count_input_tokens", None)
         if counter is None:
             raise RuntimeError("Inference client must provide count_input_tokens for budgeted calls")
-        result = counter(model=self.config.model, backend=self.config.backend, profile=self.config.profile, messages=messages)
-        input_tokens = int(result.get("input_tokens", result if isinstance(result, int) else 0))
-        limit = context_limit or int(result.get("context_limit", 0))
+        result = normalize_input_token_count(counter(model=self.config.model, backend=self.config.backend, profile=self.config.profile, messages=messages))
+        if result is None:
+            raise RuntimeError("Inference client could not count input tokens")
+        input_tokens = result
+        limit = context_limit
         if not limit:
             raise RuntimeError("Configure context_limit_tokens or provide a certified context limit")
         if input_tokens + self.config.max_output_tokens > limit:
