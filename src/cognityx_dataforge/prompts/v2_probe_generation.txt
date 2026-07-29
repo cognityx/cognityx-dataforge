@@ -1,0 +1,2 @@
+Create one diagnostic question that tests the underlying knowledge without quoting source wording.
+Return JSON with a single `question` string.

@@ -64,10 +64,20 @@ class InferenceClientPool:
         self.config = config
         self.injected_client = injected_client
         self._clients: dict[tuple[Any, ...], Any] = {}
+        self._preflight: dict[tuple[Any, ...], dict[str, Any]] = {}
 
     def client_for(self, role: GeneratorConfig) -> Any:
-        if role.provider in {"openai", "groq"} and not self.config.commercial_enabled:
-            raise RuntimeError(f"Commercial inference provider '{role.provider}' is disabled; set [commercial].enabled = true")
+        if role.provider != "local":
+            classification = getattr(self.config, "data_classification", "internal")
+            if classification in {"sensitive", "restricted", "confidential"} and not getattr(self.config, "permit_external_sensitive_data", False):
+                raise RuntimeError(f"External provider '{role.provider}' is blocked for {classification} data")
+            allowed = set(getattr(self.config, "allowed_providers", ()))
+            external_enabled = getattr(self.config, "external_enabled", getattr(self.config, "commercial_enabled", False))
+            legacy_open = getattr(self.config, "commercial_enabled", False) and not allowed
+            if not external_enabled or (allowed and role.provider not in allowed) or (not allowed and not legacy_open):
+                if not getattr(self.config, "external_enabled", False) and getattr(self.config, "commercial_enabled", False) is False:
+                    raise RuntimeError(f"Commercial inference provider '{role.provider}' is disabled; set [commercial].enabled = true")
+                raise RuntimeError(f"External inference provider '{role.provider}' is disabled or not allowlisted")
         key = (role.provider, role.server_profile if role.provider == "local" else self.config.base_url)
         if key in self._clients:
             return self._clients[key]
@@ -88,7 +98,34 @@ class InferenceClientPool:
                 profile=role.server_profile if local else None,
             )
         self._clients[key] = client
+        self._preflight[key] = self._inspect_provider(client, role)
         return client
+
+    def _inspect_provider(self, client: Any, role: GeneratorConfig) -> dict[str, Any]:
+        if role.provider == "local":
+            return {"provider": "local", "verification_source": "local-client-configuration", "capabilities": {}}
+        snapshot: dict[str, Any] = {"provider": role.provider, "model": role.model, "verification_source": "provider-capability-endpoints"}
+        for name, args in (("provider_status", ()), ("provider_capabilities", (role.provider, role.model))):
+            method = getattr(client, name, None)
+            if method is None:
+                if self.injected_client is not None:
+                    return {"provider": role.provider, "model": role.model, "verification_source": "injected-client"}
+                raise RuntimeError(f"Inference client does not support required provider preflight: {name}")
+            try:
+                snapshot[name] = method(*args)
+            except Exception as exc:
+                raise RuntimeError(f"Provider preflight failed for '{role.provider}': {exc}") from exc
+        capabilities = snapshot.get("provider_capabilities") or {}
+        if capabilities.get("model_discovery", capabilities.get("models_supported", False)):
+            method = getattr(client, "provider_models", None)
+            if method is not None:
+                snapshot["provider_models"] = method(role.provider)
+        snapshot["parameter_policy"] = capabilities.get("parameters", {})
+        return snapshot
+
+    def preflight_for(self, role: GeneratorConfig) -> dict[str, Any]:
+        self.client_for(role)
+        return dict(self._preflight[(role.provider, role.server_profile if role.provider == "local" else self.config.base_url)])
 
 
 class StructuredAdapter:
@@ -100,13 +137,15 @@ class StructuredAdapter:
     def _client(self) -> Any:
         return self.pool.client_for(self.config) if self.pool else self.client
 
+    def _preflight(self) -> dict[str, Any]:
+        return self.pool.preflight_for(self.config) if self.pool else {"provider": self.config.provider, "verification_source": "injected-client"}
+
     def ask(self, prompt: str, system: str) -> str:
         kwargs = {"model": self.config.model, "messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt}], "provider": self.config.provider}
         if self.config.provider == "local":
             kwargs.update(backend=self.config.backend or "vllm", profile=self.config.profile or "bf16")
         if self.config.max_output_tokens is not None:
             kwargs["max_output_tokens"] = self.config.max_output_tokens
-            kwargs["max_tokens"] = self.config.max_output_tokens
         return _content(self._client().chat(**kwargs))
 
     def ask_budgeted(self, prompt: str, system: str, *, context_limit: int | None, role: str, prompt_version: str, evidence_ids: list[str], calls: list[dict[str, Any]]) -> str:
@@ -116,7 +155,11 @@ class StructuredAdapter:
             kwargs.update(backend=self.config.backend or "vllm", profile=self.config.profile or "bf16")
         if self.config.max_output_tokens is not None:
             kwargs["max_output_tokens"] = self.config.max_output_tokens
-            kwargs["max_tokens"] = self.config.max_output_tokens
+        kwargs["request_metadata"] = {"model_role": role, "prompt_version": prompt_version, "evidence_ids": list(evidence_ids), "history_mode": "none"}
+        policy = self._preflight()
+        capabilities = policy.get("provider_capabilities", {})
+        if capabilities.get("structured_output", capabilities.get("structured_outputs", False)):
+            kwargs["response_format"] = {"type": "json_object"}
         try:
             response = self._client().chat(**kwargs)
         except Exception as exc:
@@ -132,7 +175,7 @@ class StructuredAdapter:
                     counted = normalize_input_token_count(counter(model=self.config.model, messages=messages, backend=self.config.backend or "vllm", profile=self.config.profile or "bf16"))
                     if counted is not None and counted + self.config.max_output_tokens > context_limit:
                         raise TokenBudgetError("Model request exceeds context budget", input_tokens=counted, max_output_tokens=self.config.max_output_tokens, context_limit=context_limit)
-        calls.append({**response_metadata(response, self.config, role), "prompt_version": prompt_version, "evidence_ids": list(evidence_ids)})
+        calls.append({**response_metadata(response, self.config, role), "profile_state": policy.get("provider_status", "configured"), "verification_source": policy.get("verification_source"), "capability_snapshot": capabilities, "parameter_policy": policy.get("parameter_policy", {}), "prompt_version": prompt_version, "evidence_ids": list(evidence_ids)})
         return _content(response)
 
 

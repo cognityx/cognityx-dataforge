@@ -1,0 +1,2 @@
+Validate the candidate against the original cited evidence, knowledge unit, probe, student response, and probe judgment.
+Return JSON with `decision` (accept or reject) and structured `reasons`.

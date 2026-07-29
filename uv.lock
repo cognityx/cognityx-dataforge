@@ -544,7 +544,7 @@ provides-extras = ["dev", "inference"]
 [[package]]
 name = "cognityx-inference"
 version = "0.1.0"
-source = { git = "https://github.com/cognityx/llm-benchmark.git#c2e13479d62a0dbc7048ed4a5db29acc50859f3d" }
+source = { git = "https://github.com/cognityx/llm-benchmark.git#c51aad2f1b39a69e3afde6340fc694636dad7608" }
 dependencies = [
     { name = "accelerate" },
     { name = "bitsandbytes" },

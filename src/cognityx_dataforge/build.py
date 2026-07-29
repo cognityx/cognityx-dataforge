@@ -127,6 +127,7 @@ def _probed_json(raw: str, *, required: tuple[str, ...]) -> dict[str, Any]:
 
 
 def _build_knowledge_unit_probed(*, manifest: dict[str, Any], dataset_name: str, config: DataForgeConfig, runtime: StorageRuntime, jobs: JobRepository, inference_client: Any, dataset_store: Any, dataset_root: str, dataset_id: str, dataset_version: str, input_manifest_uri: str, job_id: str) -> dict[str, Any]:
+    prompt_dir = Path(__file__).with_name("prompts")
     keys = {name: f"{dataset_root}/{name}.jsonl" for name in ("knowledge-units", "probes", "student-responses", "probe-judgments", "selected-units", "candidates", "validations", "records", "rejections")}
     evidence_groups = []
     for ref in manifest["evidence_refs"]:
@@ -173,10 +174,10 @@ def _build_knowledge_unit_probed(*, manifest: dict[str, Any], dataset_name: str,
                 continue
             unit = next(unit for unit in units if unit.knowledge_unit_id == probe["knowledge_unit_id"])
             try:
-                raw = probe_generator.ask_budgeted("Create one diagnostic question without quoting the source:\n" + unit.canonical_statement, "Return JSON with question.", context_limit=config.context_limit_tokens, role="probe_generator", prompt_version=config.prompt_versions.get("generation", "1.0"), evidence_ids=list(unit.source_evidence_ids), calls=calls)
+                raw = probe_generator.ask_budgeted(prompt_dir.joinpath("v2_probe_generation.txt").read_text(encoding="utf-8") + "\n" + unit.canonical_statement, "Return JSON with question.", context_limit=config.context_limit_tokens, role="probe_generator", prompt_version=config.prompt_versions.get("probe_generation", "2.0"), evidence_ids=list(unit.source_evidence_ids), calls=calls)
                 probe["question"] = _probed_json(raw, required=("question",))["question"]
                 probe["model"] = asdict(probe_generator.config)
-                probe["prompt_version"] = config.prompt_versions.get("generation", "1.0")
+                probe["prompt_version"] = config.prompt_versions.get("probe_generation", "2.0")
                 probe["request_metadata"] = dict(calls[-1])
             except (TokenBudgetError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
                 probe["question"] = ""
@@ -194,9 +195,9 @@ def _build_knowledge_unit_probed(*, manifest: dict[str, Any], dataset_name: str,
             if not probe.get("question"):
                 continue
             try:
-                raw = student.ask_budgeted(probe["question"], "Answer the question from your own knowledge. Do not request or infer hidden evidence.", context_limit=config.context_limit_tokens, role="student", prompt_version=config.prompt_versions.get("generation", "1.0"), evidence_ids=[], calls=calls)
+                raw = student.ask_budgeted(probe["question"], prompt_dir.joinpath("v2_student_probe.txt").read_text(encoding="utf-8"), context_limit=config.context_limit_tokens, role="student", prompt_version=config.prompt_versions.get("student_probe", "2.0"), evidence_ids=[], calls=calls)
                 response_id = deterministic_id(probe["probe_id"], "student-response")
-                responses.append({"student_response_id": response_id, "probe_id": probe["probe_id"], "knowledge_unit_id": probe["knowledge_unit_id"], "response": raw, "student_model": asdict(student.config), "model_role": "student", "prompt_version": config.prompt_versions.get("generation", "1.0"), "request_metadata": dict(calls[-1]), "source_asset_ids": probe["source_asset_ids"], "document_ids": probe["document_ids"], "evidence_ids": probe["evidence_ids"]})
+                responses.append({"student_response_id": response_id, "probe_id": probe["probe_id"], "knowledge_unit_id": probe["knowledge_unit_id"], "response": raw, "student_model": asdict(student.config), "model_role": "student", "prompt_version": config.prompt_versions.get("student_probe", "2.0"), "request_metadata": dict(calls[-1]), "source_asset_ids": probe["source_asset_ids"], "document_ids": probe["document_ids"], "evidence_ids": probe["evidence_ids"]})
             except (TokenBudgetError, RuntimeError) as exc:
                 rejections.append({**probe, "stage": "student", "reason": "model_rejection", "error": str(exc)})
         dataset_store.put_bytes(keys["student-responses"], _jsonl(responses), media_type="application/x-ndjson")
@@ -217,7 +218,7 @@ def _build_knowledge_unit_probed(*, manifest: dict[str, Any], dataset_name: str,
             unit = units_by_id[probe["knowledge_unit_id"]]
             cited = "\n".join(evidence_by_id[eid].text for eid in unit.source_evidence_ids if eid in evidence_by_id)
             try:
-                raw = judge.ask_budgeted(f"EVIDENCE:\n{cited}\nKNOWLEDGE UNIT:\n{unit.canonical_statement}\nSTUDENT RESPONSE:\n{response['response']}", "Return JSON with class (known, partial, unknown, invalid_probe), reasons, and reference_answer.", context_limit=config.context_limit_tokens, role="probe_judge", prompt_version=config.prompt_versions.get("validation", "1.0"), evidence_ids=list(unit.source_evidence_ids), calls=calls)
+                raw = judge.ask_budgeted(prompt_dir.joinpath("v2_probe_judgment.txt").read_text(encoding="utf-8") + f"\nEVIDENCE:\n{cited}\nKNOWLEDGE UNIT:\n{unit.canonical_statement}\nSTUDENT RESPONSE:\n{response['response']}", "Return JSON with class (known, partial, unknown, invalid_probe) and reference_answer.", context_limit=config.context_limit_tokens, role="probe_judge", prompt_version=config.prompt_versions.get("probe_judgment", "2.0"), evidence_ids=list(unit.source_evidence_ids), calls=calls)
                 data = _probed_json(raw, required=("class", "reference_answer"))
                 probe_class = data["class"]
                 if probe_class not in {"known", "partial", "unknown", "invalid_probe"}:
@@ -228,15 +229,35 @@ def _build_knowledge_unit_probed(*, manifest: dict[str, Any], dataset_name: str,
                 include = probe_class in config.include_classes or (probe_class == "known" and config.known_sample_rate > 0 and int(judgment_id[:8], 16) / 0xFFFFFFFF < config.known_sample_rate)
                 if include and probe_class != "invalid_probe":
                     selected.append({**judgment, "selection_reason": "configured_probe_class"})
-                    qa_raw = qa.ask_budgeted(f"Create QA from this evidence and knowledge unit:\n{cited}\n{unit.canonical_statement}", "Return JSON with instruction and answer.", context_limit=config.context_limit_tokens, role="qa_generator", prompt_version=config.prompt_versions.get("generation", "1.0"), evidence_ids=list(unit.source_evidence_ids), calls=calls)
-                    qa_data = _probed_json(qa_raw, required=("instruction", "answer"))
-                    candidates.append({**selected[-1], "instruction": qa_data["instruction"], "answer": qa_data["answer"], "model_role": "qa_generator", "model": asdict(qa.config), "prompt_version": config.prompt_versions.get("generation", "1.0"), "request_metadata": dict(calls[-1])})
             except (TokenBudgetError, json.JSONDecodeError, KeyError, TypeError, ValueError, RuntimeError) as exc:
                 rejections.append({**response, "stage": "judgment", "reason": "model_rejection", "error": str(exc)})
-        for name, rows in (("probe-judgments", judgments), ("selected-units", selected), ("candidates", candidates)):
-            dataset_store.put_bytes(keys[name], _jsonl(rows), media_type="application/x-ndjson")
-        checkpoint("judgment", [keys["probe-judgments"], keys["selected-units"], keys["candidates"]], len(candidates))
+        dataset_store.put_bytes(keys["probe-judgments"], _jsonl(judgments), media_type="application/x-ndjson")
+        dataset_store.put_bytes(keys["selected-units"], _jsonl(selected), media_type="application/x-ndjson")
+        checkpoint("judgment", [keys["probe-judgments"]], len(judgments))
     jobs.append_event(job_id, "stage_completed", {"stage": "judgment", "row_count": len(judgments)})
+
+    selected = _read_jsonl(dataset_store, keys["selected-units"])
+    candidates = _read_jsonl(dataset_store, keys["candidates"])
+    jobs.append_event(job_id, "stage_started", {"stage": "selection"})
+    if not _completed_checkpoint(dataset_store, dataset_root, "selection", identity, {}):
+        checkpoint("selection", [keys["selected-units"]], len(selected))
+    jobs.append_event(job_id, "stage_completed", {"stage": "selection", "row_count": len(selected)})
+    jobs.append_event(job_id, "stage_started", {"stage": "qa_generation"})
+    if not _completed_checkpoint(dataset_store, dataset_root, "qa_generation", identity, {}):
+        qa = StructuredAdapter(pool, _role_config(config, "qa_generator"))
+        units_by_id = {unit.knowledge_unit_id: unit for unit in units}
+        for selected_item in selected:
+            unit = units_by_id[selected_item["knowledge_unit_id"]]
+            cited = "\n".join(evidence_by_id[eid].text for eid in unit.source_evidence_ids if eid in evidence_by_id)
+            try:
+                qa_raw = qa.ask_budgeted(prompt_dir.joinpath("v2_probed_qa_generation.txt").read_text(encoding="utf-8") + f"\nEVIDENCE:\n{cited}\nKNOWLEDGE UNIT:\n{unit.canonical_statement}", "Return JSON with instruction and answer.", context_limit=config.context_limit_tokens, role="qa_generator", prompt_version=config.prompt_versions.get("probed_qa_generation", "2.0"), evidence_ids=list(unit.source_evidence_ids), calls=calls)
+                qa_data = _probed_json(qa_raw, required=("instruction", "answer"))
+                candidates.append({**selected_item, "instruction": qa_data["instruction"], "answer": qa_data["answer"], "model_role": "qa_generator", "model": asdict(qa.config), "prompt_version": config.prompt_versions.get("probed_qa_generation", "2.0"), "request_metadata": dict(calls[-1])})
+            except (TokenBudgetError, json.JSONDecodeError, KeyError, TypeError, ValueError, RuntimeError) as exc:
+                rejections.append({**selected_item, "stage": "qa_generation", "reason": "model_rejection", "error": str(exc)})
+        dataset_store.put_bytes(keys["candidates"], _jsonl(candidates), media_type="application/x-ndjson")
+        checkpoint("qa_generation", [keys["candidates"]], len(candidates))
+    jobs.append_event(job_id, "stage_completed", {"stage": "qa_generation", "row_count": len(candidates)})
 
     validations = _read_jsonl(dataset_store, keys["validations"])
     jobs.append_event(job_id, "stage_started", {"stage": "validation"})
@@ -244,7 +265,10 @@ def _build_knowledge_unit_probed(*, manifest: dict[str, Any], dataset_name: str,
         validator = StructuredAdapter(pool, _role_config(config, "validator"))
         for candidate in candidates:
             try:
-                raw = validator.ask_budgeted(json.dumps(candidate, sort_keys=True), "Return JSON with decision accept or reject and reasons.", context_limit=config.context_limit_tokens, role="validator", prompt_version=config.prompt_versions.get("validation", "1.0"), evidence_ids=list(candidate["evidence_ids"]), calls=calls)
+                unit = next(unit for unit in units if unit.knowledge_unit_id == candidate["knowledge_unit_id"])
+                cited = "\n".join(evidence_by_id[eid].text for eid in unit.source_evidence_ids if eid in evidence_by_id)
+                validation_material = f"{prompt_dir.joinpath('v2_probed_qa_validation.txt').read_text(encoding='utf-8')}\nEVIDENCE:\n{cited}\nKNOWLEDGE UNIT:\n{unit.canonical_statement}\nPROBE JUDGMENT:\n{json.dumps(candidate, sort_keys=True)}\nCANDIDATE:\n{json.dumps(candidate, sort_keys=True)}"
+                raw = validator.ask_budgeted(validation_material, "Return JSON with decision accept or reject and reasons.", context_limit=config.context_limit_tokens, role="validator", prompt_version=config.prompt_versions.get("probed_qa_validation", "2.0"), evidence_ids=list(candidate["evidence_ids"]), calls=calls)
                 data = _probed_json(raw, required=("decision",))
                 if data["decision"] not in {"accept", "reject"}:
                     raise ValueError("Validator decision must be accept or reject")
@@ -437,7 +461,7 @@ def build_dataset(
                 raise ValueError("Existing staged dataset is incomplete or has invalid checkpoints")
         if recipe == "knowledge-unit-probed-qa":
             checkpoint_identity = _probed_identity(dataset_name, dataset_id, dataset_version, manifest, config)
-            if not all(_completed_checkpoint(dataset_store, dataset_root, stage, checkpoint_identity, {}) for stage in ("discovery", "student", "judgment", "validation", "finalization")):
+            if not all(_completed_checkpoint(dataset_store, dataset_root, stage, checkpoint_identity, {}) for stage in ("discovery", "student", "judgment", "selection", "qa_generation", "validation", "finalization")):
                 raise ValueError("Existing staged probed dataset is incomplete or has invalid checkpoints")
         return {
             "run_id": existing["run_id"],
