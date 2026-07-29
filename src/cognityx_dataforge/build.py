@@ -18,8 +18,7 @@ from cognityx_dataforge.evidence import (
     load_run_manifest,
     validate_context,
 )
-from cognityx_dataforge.inference import GeneratorAdapter, GeneratorConfig, StructuredAdapter, TokenBudgetError, load_inference_client
-from cognityx_dataforge.inference import StructuredAdapter
+from cognityx_dataforge.inference import GeneratorAdapter, GeneratorConfig, InferenceClientPool, StructuredAdapter, TokenBudgetError, load_inference_client
 from cognityx_dataforge.knowledge import KnowledgeUnit, parse_knowledge_units
 from cognityx_dataforge.models import DatasetRecord
 from cognityx_dataforge.paragraphs import paragraph_spans
@@ -125,7 +124,8 @@ def _build_knowledge_unit_staged(*, manifest: dict[str, Any], dataset_name: str,
     evidence_availability(evidence)
     evidence_by_id = {item.evidence_id: item for item in evidence}
     identity = {"dataset_name": dataset_name, "dataset_id": dataset_id, "dataset_version": dataset_version, "source_manifest_checksum": checksum(manifest), "configuration_checksum": checksum(asdict(config)), "prompt_versions": dict(config.prompt_versions)}
-    discovery = StructuredAdapter(inference_client, GeneratorConfig(**asdict(config.knowledge_unit or config.generator)))
+    pool = inference_client if isinstance(inference_client, InferenceClientPool) else InferenceClientPool(config=config, injected_client=inference_client)
+    discovery = StructuredAdapter(pool, GeneratorConfig(**asdict(config.knowledge_unit or config.generator)))
     units = [KnowledgeUnit.from_dict(item) for item in _read_jsonl(dataset_store, knowledge_key)]
     jobs.append_event(job_id, "stage_started", {"stage": "discovery"})
     _check_cancel(jobs, job_id, "discovery")
@@ -145,7 +145,7 @@ def _build_knowledge_unit_staged(*, manifest: dict[str, Any], dataset_name: str,
         dataset_store.put_bytes(f"{dataset_root}/model-calls-discovery.jsonl", _jsonl(calls), media_type="application/x-ndjson")
         _write_checkpoint(dataset_store, dataset_root, "discovery", identity, {knowledge_key: checksum(knowledge_bytes.decode())}, len(units))
     jobs.append_event(job_id, "stage_completed", {"stage": "discovery", "row_count": len(units)})
-    qa = StructuredAdapter(inference_client, GeneratorConfig(**asdict(config.qa_generator or config.generator)))
+    qa = StructuredAdapter(pool, GeneratorConfig(**asdict(config.qa_generator or config.generator)))
     candidates = _read_jsonl(dataset_store, candidates_key)
     jobs.append_event(job_id, "stage_started", {"stage": "generation"})
     _check_cancel(jobs, job_id, "generation")
@@ -168,7 +168,7 @@ def _build_knowledge_unit_staged(*, manifest: dict[str, Any], dataset_name: str,
         dataset_store.put_bytes(f"{dataset_root}/model-calls-generation.jsonl", _jsonl(calls), media_type="application/x-ndjson")
         _write_checkpoint(dataset_store, dataset_root, "generation", identity, {candidates_key: checksum(candidates_bytes.decode())}, len(candidates))
     jobs.append_event(job_id, "stage_completed", {"stage": "generation", "row_count": len(candidates)})
-    validator = StructuredAdapter(inference_client, GeneratorConfig(**asdict(config.validator or config.generator)))
+    validator = StructuredAdapter(pool, GeneratorConfig(**asdict(config.validator or config.generator)))
     validations = _read_jsonl(dataset_store, validations_key)
     jobs.append_event(job_id, "stage_started", {"stage": "validation"})
     _check_cancel(jobs, job_id, "validation")
@@ -286,7 +286,7 @@ def build_dataset(
         try:
             return _build_knowledge_unit_staged(
                 manifest=manifest, dataset_name=dataset_name, config=config, runtime=runtime, jobs=jobs,
-                inference_client=inference_client or load_inference_client(),
+                inference_client=InferenceClientPool(config=config, injected_client=inference_client) if inference_client is not None else InferenceClientPool(config=config),
                 dataset_store=dataset_store, dataset_root=dataset_root,
                 dataset_id=dataset_id, dataset_version=dataset_version,
                 input_manifest_uri=input_manifest_uri, job_id=job.job_id,
@@ -307,12 +307,11 @@ def build_dataset(
         evidence = combine_evidence(evidence_groups)
         validate_context(manifest, evidence)
         evidence_availability(evidence)
-        if inference_client is None:
-            inference_client = load_inference_client()
-        generator = GeneratorAdapter(inference_client, GeneratorConfig(**asdict(config.generator)))
-        structured = StructuredAdapter(inference_client, GeneratorConfig(**asdict(config.generator)))
+        pool = InferenceClientPool(config=config, injected_client=inference_client)
+        generator = GeneratorAdapter(pool, GeneratorConfig(**asdict(config.generator)))
+        structured = StructuredAdapter(pool, GeneratorConfig(**asdict(config.generator)))
         validator_config = config.validator or config.generator
-        validator = StructuredAdapter(inference_client, GeneratorConfig(**asdict(validator_config)))
+        validator = StructuredAdapter(pool, GeneratorConfig(**asdict(validator_config)))
         records: list[DatasetRecord] = []
         candidates: list[dict[str, Any]] = []
         rejections: list[dict[str, Any]] = []
