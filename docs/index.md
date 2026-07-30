@@ -10,5 +10,6 @@ The V0 boundary is deliberately small: DataForge owns dataset construction,
 validation, generation, rejection records, and dataset manifests. Ingest owns
 document parsing, Storage owns durable artifacts, Jobs owns lifecycle state,
 and Inference owns model serving.
+Read the Introduction for conceptual understanding [Introduction](introduction.md)
 
 Start with the [reference guide](reference.md) for the end-to-end CLI sequence.
