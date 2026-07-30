@@ -1,64 +1,47 @@
 # Cognityx DataForge
 
-DataForge turns evidence extracted from source documents into examples that
-can be used to train or evaluate a model. It sits between document processing
-and model training in the Cognityx application flow:
+DataForge turns evidence from source documents into examples that can train or
+evaluate a model. It sits after Cognityx Ingest and before Cognityx Training:
 
 ```text
 Source files -> Ingest -> DataForge -> Training and evaluation
                 parses     builds      use the examples
-                evidence   examples
+                evidence   datasets
 ```
 
-DataForge provides three ways to build examples: `paragraph-qa`,
-`knowledge-unit-qa`, and the research recipe `knowledge-unit-probed-qa`. The
-research recipe checks what an untrained base model already knows, compares its
-responses with the source evidence, and creates validated question-and-answer
-examples only where they are useful. Running a recipe again with the same
-inputs and settings produces the same inspectable JSONL artifacts. This
-repeatable behavior is technically called deterministic output.
+DataForge does not parse documents, choose physical storage paths, manage model
+servers or train models. Ingest prepares evidence, Storage keeps artifacts,
+Jobs records execution state, Inference performs model calls, and Training
+consumes successful datasets.
 
-## Core Terms in Training Data Creation
+## What a build does
 
-The lifecycle of training-data creation starts from a source document or other source asset and ends with training examples, usually in the form of question–answer pairs or instruction–answer pairs for instruction fine-tuning.
+A build:
 
-Before describing this lifecycle, Cognityx defines the commonly used terms.
+1. resolves a completed Ingest source from configured Storage;
+2. records the exact source selection and effective configuration;
+3. creates a Jobs-managed run with progress events;
+4. runs one preparation recipe through Cognityx Inference;
+5. validates, deduplicates and groups related records into stable splits; and
+6. publishes an immutable dataset only after successful validation.
 
-**Source asset** is the original digital object received or referenced by Cognityx, such as a PDF, Word document, web page, image, audio file, database record, or file-share URI.
+Failed or cancelled runs keep their inspectable run artifacts but do not
+publish a dataset manifest.
 
-**Source document** is a source asset whose content is treated as a document and can be parsed into text, sections, tables, pages, or other document structures.
+## Research purpose
 
-**Evidence** is a specific part of the source content that supports a claim or answer. It includes the supporting content and enough location information to find it again.
+DataForge provides three implemented recipes for comparing data-preparation
+methods:
 
-**Provenance** records where the evidence came from and how it was created or processed. It includes its **lineage**, meaning the ordered chain connecting the evidence to the objects from which it was derived.
+- **Paragraph QA** creates examples directly from paragraphs.
+- **Knowledge-Unit QA** first identifies a self-contained piece of knowledge.
+- **Probed Knowledge-Unit QA** first checks what the student model knows.
 
-**Ground truth** is a fact, label, or expected result that has been validated and accepted as correct for a defined context.
+**Probed Mixed QA** is a planned fourth experiment that would choose different
+record styles from the probe result and knowledge type. It is not currently an
+executable recipe, and no research hypothesis in this documentation should be
+read as a proven result or a novelty claim.
 
-**Reference answer** is an approved way of expressing the ground truth as an answer to a particular question or instruction.
-
-### Example
-
-A company travel-policy PDF is the **source asset** and, after being interpreted as a document, the **source document**.
-
-The sentence stating that claims must be submitted within 30 days is the **evidence**.
-
-The chain:
-
-`PDF → parsed text → paragraph → evidence`
-
-is the evidence **lineage**. The source version, processing steps, and this lineage together form its **provenance**.
-
-The validated rule, “the submission deadline is 30 days,” is the **ground truth**.
-
-The answer, “Employees must submit travel claims within 30 days of completing the journey,” is the **reference answer**.
-
-The resulting question and reference answer can then become a training or evaluation example.
-
-
-The V0 boundary is deliberately small: DataForge owns dataset construction,
-validation, generation, rejection records, and dataset manifests. Ingest owns
-document parsing, Storage owns durable artifacts, Jobs owns lifecycle state,
-and Inference owns model serving.
-
-Read the [introduction](introduction.md) for the main concepts, then use the
-[reference guide](reference.md) for the end-to-end command-line sequence.
+Read the [introduction](introduction.md) for terminology, the
+[variant guide](variants.md) for the research progression, and the
+[reference](reference.md) for commands and artifacts.

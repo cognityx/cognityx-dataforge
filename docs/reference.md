@@ -1,174 +1,96 @@
 # Reference
 
+## Configure Storage
+
+Normal DataForge commands use the same Cognityx Storage configuration as other
+components. Configuration is selected by `cognityx-storage`, including
+`COGNITYX_STORAGE_CONFIG`, project configuration, user configuration and the
+built-in local profile.
+
+`--storage-config` explicitly selects a configuration file. The older
+`--storage-root` option remains as a deprecated advanced override and should
+not appear in normal workflows.
+
 ## Build a dataset
 
 ```bash
-cognityx-dataforge build \
-  --input-manifest storage://local-main/artifacts/ingest/runs/<run-id>/manifest.json \
-  --dataset-name my-dataset \
-  --recipe paragraph-qa \
-  --config dataforge.toml \
-  --storage-root /tmp/cognityx-storage
+cognityx-dataforge build paragraph-qa \
+  --source storage://local-main/artifacts/ingest/runs/<run-id>/manifest.json \
+  --experiment-id travel-policy-comparison \
+  --config dataforge.toml
 ```
 
-The command returns JSON containing the job id, dataset id, record count, and
-dataset manifest URI.
+`--source` accepts a Storage URI for a completed Ingest run manifest or an
+existing `cognityx.dataforge.input-selection/v1` manifest. DataForge persists a
+normalized `input-selection.json` for reproducibility.
 
-## Artifact layout
+`--input-manifest` remains a deprecated compatibility alias for `--source`.
+Bundle, context and document identifiers are not accepted directly yet because
+Ingest does not currently expose a canonical completed-run lookup for those
+references.
+
+The result contains separate experiment, variant, run, job and dataset
+identifiers plus the published manifest URI.
+
+## Jobs
+
+Normal builds run synchronously but use a durable Jobs repository. Set
+`COGNITYX_DATAFORGE_JOBS_DB` to choose its SQLite database.
+
+```bash
+cognityx-dataforge job show <job-id>
+cognityx-dataforge job watch <job-id>
+cognityx-dataforge job cancel <job-id>
+```
+
+DataForge does not expose `--detach`, retry or deletion yet. The current
+`cognityx-jobs` contract has no durable worker queue, retry operation or delete
+operation, and DataForge does not create a competing job framework.
+
+## Logical artifact layout
+
+Physical locations remain hidden behind Cognityx Storage. Logical keys follow:
 
 ```text
-datasets/<dataset-id>/<dataset-version>/
-  manifest.json
-  records.jsonl
-  candidates.jsonl
-  rejections.jsonl
-  run-events.jsonl
+dataforge/experiments/<experiment-id>/
+  variants/<variant-id>/
+    runs/<run-id>/
+      input-selection.json
+      run-events.jsonl
+      datasets/<dataset-id>/<dataset-version>/
+        candidates.jsonl
+        rejections.jsonl
+        records.jsonl
+        model-calls*.jsonl
+        checkpoints/
+        manifest.json
 ```
 
-The manifest records source identity, recipe, prompt and model metadata, split
-counts, checksums, and the URIs of the JSONL artifacts. Rejected generations
-remain inspectable instead of silently disappearing. The compatibility aliases
-`v0` and `v1` map to `paragraph-qa` and `knowledge-unit-qa`; `--variant` is
-deprecated.
+The final `manifest.json` is written only after validation, splitting,
+deduplication and cancellation checks succeed. Storage supplies physical blob
+deduplication; DataForge separately removes exact duplicate generated records
+and records `duplicate_count`.
 
-## Knowledge-unit QA
+## Splits and statistics
+
+`[splitting].seed` controls deterministic train, validation and test assignment:
+
+```toml
+[splitting]
+seed = "experiment-2026-01"
+```
+
+Related records share a split group based on source asset, then document,
+knowledge unit or evidence identity. Manifests record accepted, rejected,
+duplicate, truncation and inference-failure counts.
+
+## Export
 
 ```bash
-cognityx-dataforge build \
-  --input-manifest <run-manifest-uri> \
-  --dataset-name research \
-  --recipe knowledge-unit-qa \
-  --config dataforge-knowledge.toml \
-  --storage-root /tmp/cognityx-storage
+cognityx-dataforge dataset export \
+  <dataset-manifest-uri> \
+  --output records.jsonl
 ```
 
-This recipe discovers multiple provenance-preserving knowledge units from each
-evidence record, generates instruction-answer candidates, and validates them
-against the cited evidence. It writes `knowledge-units.jsonl`,
-`validations.jsonl`, and `rejections.jsonl`; rejected records are excluded
-from `records.jsonl`.
-
-Knowledge-unit QA runs in three resumable stages: discovery, QA generation,
-then validation. Each model request is stateless and includes its complete
-material for that request. Configure `context_limit_tokens` at the TOML root;
-DataForge calls `count_input_tokens` before every request and records the role,
-model settings, token budget, prompt version, and evidence IDs. Requests that
-would exceed the budget are rejected with structured reasons rather than
-silently truncated.
-
-Each dataset also contains explicit `checkpoints/{discovery,generation,
-validation,finalization}.json` files. Checkpoints include stage identity,
-artifact checksums, completion status, and row counts, so an empty but
-successfully completed stage can resume safely without repeating model calls.
-
-The model roles may be configured independently:
-
-```toml
-context_limit_tokens = 32768
-
-[models.knowledge_unit]
-model = "Qwen/Qwen3-32B"
-backend = "vllm"
-profile = "int4"
-max_output_tokens = 2048
-
-[models.qa_generator]
-model = "Qwen/Qwen3-32B"
-backend = "vllm"
-profile = "int4"
-max_output_tokens = 1024
-
-[models.validator]
-model = "Qwen/Qwen3-14B"
-backend = "vllm"
-profile = "int4"
-max_output_tokens = 512
-```
-
-When the first two roles are absent, they fall back to `[models.generator]`.
-
-## Knowledge-unit probed QA
-
-```bash
-cognityx-dataforge build \
-  --input-manifest <run-manifest-uri> \
-  --dataset-name research-probed \
-  --recipe knowledge-unit-probed-qa \
-  --config dataforge-probing.toml \
-  --storage-root /tmp/cognityx-storage
-```
-
-This research recipe generates diagnostic probes for each knowledge unit,
-asks the configured untrained student without evidence or target answers,
-judges the response using the original evidence, and generates QA only for
-selected `partial` and `unknown` judgments by default. `known` and
-`invalid_probe` results remain in the probe artifacts and are not silently
-deleted.
-
-```toml
-[probing]
-probes_per_unit = 2
-include_classes = ["partial", "unknown"]
-known_sample_rate = 0.0
-
-[models.student]
-provider = "local"
-model = "Qwen/Qwen3-8B"
-server_profile = "qwen3-8b-int4"
-```
-
-Only `local` is treated as a local inference provider. External providers are
-generic and must be explicitly enabled and allowlisted:
-
-```toml
-[external_inference]
-enabled = false
-allowed_providers = []
-
-[data]
-classification = "internal"
-permit_external_sensitive_data = false
-```
-
-The older `[commercial].enabled = true` setting remains accepted for
-backward compatibility. DataForge performs provider status and capability
-preflight without automatically calling provider test endpoints.
-
-Artifacts include `probes.jsonl`, `student-responses.jsonl`,
-`probe-judgments.jsonl`, `selected-units.jsonl`, and the normal candidate,
-validation, rejection, and record files. The stages are checkpointed as
-discovery, student, judgment, validation, and finalization. Student requests
-are stateless and contain only the generated probe question.
-
-## Python API
-
-```python
-from cognityx_dataforge.build import build_dataset
-
-result = build_dataset(
-    input_manifest_uri="storage://local-main/artifacts/ingest/runs/run-123/manifest.json",
-    dataset_name="my-dataset",
-    recipe="paragraph-qa",
-    config_path="dataforge.toml",
-)
-print(result["dataset_manifest_uri"])
-```
-
-The build function accepts an optional injected inference client, keeping unit
-tests and local dry runs independent of a live model server.
-
-For a local smoke test, provide a completed run manifest and configure the
-same Storage Runtime used by Ingest with `--storage-root` or `--storage-config`.
-A live Inference endpoint is only required when the injected client is omitted;
-install it with `pip install cognityx-dataforge[inference]`.
-
-To export records, use `dataset export <manifest-uri> --output records.jsonl`.
-The command resolves `records_uri`, verifies its checksum, and writes only the
-records JSONL artifact.
-
-## Validation
-
-Before generation, DataForge checks the ingest manifest schema, evidence
-availability, document/context consistency, and paragraph boundaries. Invalid
-or incomplete model responses are written to `rejections.jsonl` with a reason
-and excluded from `records.jsonl`.
+Export resolves `records_uri` through Storage and verifies its checksum before
+writing the requested local output file.

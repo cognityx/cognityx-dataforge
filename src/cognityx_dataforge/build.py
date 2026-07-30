@@ -2,15 +2,20 @@ from __future__ import annotations
 
 import json
 import time
+import warnings
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
 from cognityx_jobs import JobRepository
-from cognityx_storage import StorageClient, StorageConfig, StorageRuntime
+from cognityx_storage import StorageConfig, StorageRuntime
 
 from cognityx_dataforge.config import DataForgeConfig
-from cognityx_dataforge.dataset import checksum, deterministic_id, split_for_index
+from cognityx_dataforge.dataset import (
+    checksum,
+    deduplicate_records,
+    deterministic_id,
+)
 from cognityx_dataforge.evidence import (
     combine_evidence,
     evidence_availability,
@@ -18,43 +23,46 @@ from cognityx_dataforge.evidence import (
     load_run_manifest,
     validate_context,
 )
-from cognityx_dataforge.inference import GeneratorAdapter, GeneratorConfig, InferenceClientPool, StructuredAdapter, TokenBudgetError, load_inference_client, normalized_error_category
+from cognityx_dataforge.inference import GeneratorAdapter, GeneratorConfig, InferenceClientPool, StructuredAdapter, TokenBudgetError, normalized_error_category
 from cognityx_dataforge.knowledge import KnowledgeUnit, parse_knowledge_units
 from cognityx_dataforge.models import DatasetRecord
 from cognityx_dataforge.paragraphs import paragraph_spans
 from cognityx_dataforge.recipes import normalize_recipe
+from cognityx_dataforge.execution import BuildIdentity, load_job_repository
+from cognityx_dataforge.source import resolve_source, resolve_storage_uri
 
 
 def _runtime(root: str | Path | None, config_path: str | Path | None) -> StorageRuntime:
+    if root is not None:
+        warnings.warn(
+            "storage_root is deprecated; configure Cognityx Storage instead.",
+            FutureWarning,
+            stacklevel=2,
+        )
+        return StorageRuntime.from_config(StorageConfig.built_in(root=root))
     if config_path:
         return StorageRuntime.load(config_file=config_path)
-    return StorageRuntime.from_config(StorageConfig.built_in(root=root or "/tmp/cognityx-dataforge-storage"))
-
-
-def resolve_storage_uri(runtime: StorageRuntime, uri: str, role_name: str = "artifact"):
-    """Resolve both shared-scope and profile/namespace Storage URIs."""
-    if not uri.startswith("storage://"):
-        raise ValueError(f"Expected storage URI, got: {uri}")
-    remainder = uri.removeprefix("storage://")
-    first, separator, tail = remainder.partition("/")
-    if first == "shared":
-        profile = runtime.config.default_profile
-        if profile is None:
-            raise ValueError("Storage configuration has no default profile for shared URI")
-        runtime.for_profile(profile, role_name=role_name)
-        backend = runtime._backends[profile]  # Runtime owns the configured backend lifecycle.
-        return StorageClient(backend).for_shared_data(), tail
-    if first not in runtime.config.profiles:
-        raise ValueError(f"Unknown storage URI profile: {first}")
-    store = runtime.for_profile(first, role_name=role_name)
-    key = tail if separator else ""
-    namespace = store.namespace.strip("/")
-    if namespace and key.startswith(namespace + "/"):
-        key = key[len(namespace) + 1 :]
-    return store, key
+    return StorageRuntime.load()
 
 
 _store_for_uri = resolve_storage_uri
+
+
+def _identity_fields(identity: BuildIdentity) -> dict[str, str]:
+    return identity.fields()
+
+
+def _persist_run_events(
+    store: Any,
+    run_root: str,
+    jobs: JobRepository,
+    job_id: str,
+) -> None:
+    store.put_bytes(
+        f"{run_root}/run-events.jsonl",
+        _jsonl(jobs.events(job_id)),
+        media_type="application/x-ndjson",
+    )
 
 
 def _jsonl(rows: list[dict[str, Any]]) -> bytes:
@@ -110,9 +118,15 @@ def _role_config(config: DataForgeConfig, name: str) -> GeneratorConfig:
     return GeneratorConfig(**asdict(value))
 
 
-def _probed_identity(dataset_name: str, dataset_id: str, dataset_version: str, manifest: dict[str, Any], config: DataForgeConfig) -> dict[str, Any]:
+def _probed_identity(
+    dataset_name: str,
+    identity: BuildIdentity,
+    manifest: dict[str, Any],
+    config: DataForgeConfig,
+) -> dict[str, Any]:
     return {
-        "dataset_name": dataset_name, "dataset_id": dataset_id, "dataset_version": dataset_version,
+        "dataset_name": dataset_name,
+        **_identity_fields(identity),
         "source_manifest_checksum": checksum(manifest), "configuration_checksum": checksum(asdict(config)),
         "recipe": "knowledge-unit-probed-qa", "probing": {"probes_per_unit": config.probes_per_unit, "include_classes": list(config.include_classes), "known_sample_rate": config.known_sample_rate},
         "prompt_versions": dict(config.prompt_versions),
@@ -126,7 +140,10 @@ def _probed_json(raw: str, *, required: tuple[str, ...]) -> dict[str, Any]:
     return value
 
 
-def _build_knowledge_unit_probed(*, manifest: dict[str, Any], dataset_name: str, config: DataForgeConfig, runtime: StorageRuntime, jobs: JobRepository, inference_client: Any, dataset_store: Any, dataset_root: str, dataset_id: str, dataset_version: str, input_manifest_uri: str, job_id: str) -> dict[str, Any]:
+def _build_knowledge_unit_probed(*, manifest: dict[str, Any], dataset_name: str, config: DataForgeConfig, runtime: StorageRuntime, jobs: JobRepository, inference_client: Any, dataset_store: Any, dataset_root: str, identity: BuildIdentity, input_manifest_uri: str) -> dict[str, Any]:
+    job_id = identity.job_id
+    dataset_id = identity.dataset_id
+    dataset_version = identity.dataset_version
     prompt_dir = Path(__file__).with_name("prompts")
     keys = {name: f"{dataset_root}/{name}.jsonl" for name in ("knowledge-units", "probes", "student-responses", "probe-judgments", "selected-units", "candidates", "validations", "records", "rejections")}
     evidence_groups = []
@@ -138,9 +155,9 @@ def _build_knowledge_unit_probed(*, manifest: dict[str, Any], dataset_name: str,
     validate_context(manifest, evidence)
     evidence_availability(evidence)
     evidence_by_id = {item.evidence_id: item for item in evidence}
-    identity = _probed_identity(dataset_name, dataset_id, dataset_version, manifest, config)
+    checkpoint_identity = _probed_identity(dataset_name, identity, manifest, config)
     pool = inference_client if isinstance(inference_client, InferenceClientPool) else InferenceClientPool(config=config, injected_client=inference_client)
-    pool.set_lineage(dataset_id=dataset_id, dataset_version=dataset_version, run_id=job_id, job_id=job_id, recipe="knowledge-unit-probed-qa", data_classification=config.data_classification)
+    pool.set_lineage(dataset_id=dataset_id, dataset_version=dataset_version, run_id=identity.run_id, job_id=job_id, recipe="knowledge-unit-probed-qa", data_classification=config.data_classification)
     calls: list[dict[str, Any]] = []
     rejections = _read_jsonl(dataset_store, keys["rejections"])
 
@@ -149,13 +166,13 @@ def _build_knowledge_unit_probed(*, manifest: dict[str, Any], dataset_name: str,
         for key in artifacts:
             with dataset_store.open(key) as handle:
                 checksums[key] = checksum(handle.read().decode())
-        _write_checkpoint(dataset_store, dataset_root, stage, identity, checksums, rows)
+        _write_checkpoint(dataset_store, dataset_root, stage, checkpoint_identity, checksums, rows)
 
     units = [KnowledgeUnit.from_dict(row) for row in _read_jsonl(dataset_store, keys["knowledge-units"])]
     probes = _read_jsonl(dataset_store, keys["probes"])
     _check_cancel(jobs, job_id, "discovery")
     jobs.append_event(job_id, "stage_started", {"stage": "discovery"})
-    if not _completed_checkpoint(dataset_store, dataset_root, "discovery", identity, {}):
+    if not _completed_checkpoint(dataset_store, dataset_root, "discovery", checkpoint_identity, {}):
         discovery = StructuredAdapter(pool, _role_config(config, "knowledge_unit"))
         for item in evidence:
             _check_cancel(jobs, job_id, "discovery")
@@ -186,11 +203,11 @@ def _build_knowledge_unit_probed(*, manifest: dict[str, Any], dataset_name: str,
         dataset_store.put_bytes(keys["knowledge-units"], _jsonl([unit.to_dict() for unit in units]), media_type="application/x-ndjson")
         dataset_store.put_bytes(keys["probes"], _jsonl(probes), media_type="application/x-ndjson")
         checkpoint("discovery", [keys["knowledge-units"], keys["probes"]], len(probes))
-    jobs.append_event(job_id, "stage_completed", {"stage": "discovery", "row_count": len(probes)})
+    jobs.append_event(job_id, "stage_completed", {"stage": "discovery", "knowledge_units_created": len(units), "probes_created": len(probes)})
 
     responses = _read_jsonl(dataset_store, keys["student-responses"])
     jobs.append_event(job_id, "stage_started", {"stage": "student"})
-    if not _completed_checkpoint(dataset_store, dataset_root, "student", identity, {}):
+    if not _completed_checkpoint(dataset_store, dataset_root, "student", checkpoint_identity, {}):
         student = StructuredAdapter(pool, _role_config(config, "student"))
         for probe in probes:
             if not probe.get("question"):
@@ -203,13 +220,13 @@ def _build_knowledge_unit_probed(*, manifest: dict[str, Any], dataset_name: str,
                 rejections.append({**probe, "stage": "student", "reason": normalized_error_category(exc), "error": str(exc)})
         dataset_store.put_bytes(keys["student-responses"], _jsonl(responses), media_type="application/x-ndjson")
         checkpoint("student", [keys["student-responses"]], len(responses))
-    jobs.append_event(job_id, "stage_completed", {"stage": "student", "row_count": len(responses)})
+    jobs.append_event(job_id, "stage_completed", {"stage": "student", "probes_completed": len(responses)})
 
     judgments = _read_jsonl(dataset_store, keys["probe-judgments"])
     selected = _read_jsonl(dataset_store, keys["selected-units"])
     candidates = _read_jsonl(dataset_store, keys["candidates"])
     jobs.append_event(job_id, "stage_started", {"stage": "judgment"})
-    if not _completed_checkpoint(dataset_store, dataset_root, "judgment", identity, {}):
+    if not _completed_checkpoint(dataset_store, dataset_root, "judgment", checkpoint_identity, {}):
         judge = StructuredAdapter(pool, _role_config(config, "probe_judge"))
         qa = StructuredAdapter(pool, _role_config(config, "qa_generator"))
         units_by_id = {unit.knowledge_unit_id: unit for unit in units}
@@ -235,16 +252,16 @@ def _build_knowledge_unit_probed(*, manifest: dict[str, Any], dataset_name: str,
         dataset_store.put_bytes(keys["probe-judgments"], _jsonl(judgments), media_type="application/x-ndjson")
         dataset_store.put_bytes(keys["selected-units"], _jsonl(selected), media_type="application/x-ndjson")
         checkpoint("judgment", [keys["probe-judgments"]], len(judgments))
-    jobs.append_event(job_id, "stage_completed", {"stage": "judgment", "row_count": len(judgments)})
+    jobs.append_event(job_id, "stage_completed", {"stage": "judgment", "probes_judged": len(judgments)})
 
     selected = _read_jsonl(dataset_store, keys["selected-units"])
     candidates = _read_jsonl(dataset_store, keys["candidates"])
     jobs.append_event(job_id, "stage_started", {"stage": "selection"})
-    if not _completed_checkpoint(dataset_store, dataset_root, "selection", identity, {}):
+    if not _completed_checkpoint(dataset_store, dataset_root, "selection", checkpoint_identity, {}):
         checkpoint("selection", [keys["selected-units"]], len(selected))
-    jobs.append_event(job_id, "stage_completed", {"stage": "selection", "row_count": len(selected)})
+    jobs.append_event(job_id, "stage_completed", {"stage": "selection", "knowledge_units_selected": len(selected)})
     jobs.append_event(job_id, "stage_started", {"stage": "qa_generation"})
-    if not _completed_checkpoint(dataset_store, dataset_root, "qa_generation", identity, {}):
+    if not _completed_checkpoint(dataset_store, dataset_root, "qa_generation", checkpoint_identity, {}):
         qa = StructuredAdapter(pool, _role_config(config, "qa_generator"))
         units_by_id = {unit.knowledge_unit_id: unit for unit in units}
         for selected_item in selected:
@@ -258,11 +275,11 @@ def _build_knowledge_unit_probed(*, manifest: dict[str, Any], dataset_name: str,
                 rejections.append({**selected_item, "stage": "qa_generation", "reason": normalized_error_category(exc), "error": str(exc)})
         dataset_store.put_bytes(keys["candidates"], _jsonl(candidates), media_type="application/x-ndjson")
         checkpoint("qa_generation", [keys["candidates"]], len(candidates))
-    jobs.append_event(job_id, "stage_completed", {"stage": "qa_generation", "row_count": len(candidates)})
+    jobs.append_event(job_id, "stage_completed", {"stage": "qa_generation", "records_generated": len(candidates)})
 
     validations = _read_jsonl(dataset_store, keys["validations"])
     jobs.append_event(job_id, "stage_started", {"stage": "validation"})
-    if not _completed_checkpoint(dataset_store, dataset_root, "validation", identity, {}):
+    if not _completed_checkpoint(dataset_store, dataset_root, "validation", checkpoint_identity, {}):
         validator = StructuredAdapter(pool, _role_config(config, "validator"))
         for candidate in candidates:
             try:
@@ -282,24 +299,29 @@ def _build_knowledge_unit_probed(*, manifest: dict[str, Any], dataset_name: str,
                 rejections.append({**candidate, "stage": "validation", "reason": normalized_error_category(exc), "error": str(exc)})
         dataset_store.put_bytes(keys["validations"], _jsonl(validations), media_type="application/x-ndjson")
         checkpoint("validation", [keys["validations"]], len(validations))
-    jobs.append_event(job_id, "stage_completed", {"stage": "validation", "row_count": len(validations)})
+    jobs.append_event(job_id, "stage_completed", {"stage": "validation", "records_accepted": sum(item.get("decision") == "accept" for item in validations), "records_rejected": sum(item.get("decision") == "reject" for item in validations)})
 
     accepted = [item for item in validations if item.get("decision") == "accept"]
-    records = [{"record_id": deterministic_id(dataset_id, item["probe_judgment_id"], item["instruction"], item["answer"]), "messages": [{"role": "user", "content": item["instruction"]}, {"role": "assistant", "content": item["answer"]}], "split": split_for_index(index), "metadata": {**{key: item.get(key, []) for key in ("source_asset_ids", "document_ids", "evidence_ids")}, "knowledge_unit_id": item["knowledge_unit_id"], "probe_id": item["probe_id"], "probe_class": item["probe_class"], "probe_judgment_id": item["probe_judgment_id"], "selection_reason": item.get("selection_reason", "configured_probe_class"), "student_model": item.get("student_model", asdict(_role_config(config, "student"))), "student_response_id": item.get("student_response_id"), "recipe": "knowledge-unit-probed-qa"}} for index, item in enumerate(accepted)]
+    records = [{"record_id": deterministic_id(dataset_id, item["probe_judgment_id"], item["instruction"], item["answer"]), "messages": [{"role": "user", "content": item["instruction"]}, {"role": "assistant", "content": item["answer"]}], "split": "", "metadata": {**{key: item.get(key, []) for key in ("source_asset_ids", "document_ids", "evidence_ids")}, "knowledge_unit_id": item["knowledge_unit_id"], "probe_id": item["probe_id"], "probe_class": item["probe_class"], "probe_judgment_id": item["probe_judgment_id"], "selection_reason": item.get("selection_reason", "configured_probe_class"), "student_model": item.get("student_model", asdict(_role_config(config, "student"))), "student_response_id": item.get("student_response_id"), "recipe": "knowledge-unit-probed-qa"}} for item in accepted]
+    records, duplicate_count = deduplicate_records(records, split_seed=config.split_seed)
     dataset_store.put_bytes(keys["records"], _jsonl(records), media_type="application/x-ndjson")
     dataset_store.put_bytes(keys["rejections"], _jsonl(rejections), media_type="application/x-ndjson")
     final_artifacts = {key: checksum(_jsonl(_read_jsonl(dataset_store, key)).decode()) for key in keys.values() if dataset_store.exists(key)}
     jobs.append_event(job_id, "stage_started", {"stage": "finalization"})
-    payload = {"dataset_id": dataset_id, "dataset_name": dataset_name, "recipe": "knowledge-unit-probed-qa", "dataset_version": dataset_version, "schema_version": "cognityx.dataforge.dataset/v1", "source_manifest_uri": input_manifest_uri, "source_manifest_checksum": checksum(manifest), "configuration_checksum": checksum(asdict(config)), "models": {name: asdict(getattr(config, name) or config.generator) for name in ("knowledge_unit", "probe_generator", "student", "probe_judge", "qa_generator", "validator")}, "probing": {"probes_per_unit": config.probes_per_unit, "include_classes": list(config.include_classes), "known_sample_rate": config.known_sample_rate}, "prompt_versions": dict(config.prompt_versions), "probe_count": len(probes), "judgment_count": len(judgments), "selected_count": len(selected), "accepted_count": len(records), "rejected_count": len(rejections), "records_uri": dataset_store.uri(keys["records"]), "records_checksum": final_artifacts[keys["records"]], "run_id": job_id, "job_id": job_id}
-    dataset_store.put_json_idempotent(f"{dataset_root}/manifest.json", payload)
+    _check_cancel(jobs, job_id, "finalization")
+    payload = {**_identity_fields(identity), "dataset_name": dataset_name, "recipe": "knowledge-unit-probed-qa", "schema_version": "cognityx.dataforge.dataset/v1", "source_manifest_uri": input_manifest_uri, "input_selection_uri": dataset_store.uri(f"{identity.run_root}/input-selection.json"), "source_manifest_checksum": checksum(manifest), "configuration_checksum": checksum(asdict(config)), "effective_configuration": asdict(config), "models": {name: asdict(getattr(config, name) or config.generator) for name in ("knowledge_unit", "probe_generator", "student", "probe_judge", "qa_generator", "validator")}, "probing": {"probes_per_unit": config.probes_per_unit, "include_classes": list(config.include_classes), "known_sample_rate": config.known_sample_rate}, "prompt_versions": dict(config.prompt_versions), "split_seed": config.split_seed, "probe_count": len(probes), "judgment_count": len(judgments), "selected_count": len(selected), "accepted_count": len(records), "rejected_count": len(rejections), "duplicate_count": duplicate_count, "truncation_count": sum(item.get("status") == "truncated" for item in calls), "inference_failure_count": sum(item.get("status") == "failed" for item in calls), "train_count": sum(item["split"] == "train" for item in records), "validation_count": sum(item["split"] == "validation" for item in records), "test_count": sum(item["split"] == "test" for item in records), "records_uri": dataset_store.uri(keys["records"]), "records_checksum": final_artifacts[keys["records"]]}
     checkpoint("finalization", list(final_artifacts), len(records))
-    jobs.append_event(job_id, "stage_completed", {"stage": "finalization", "row_count": len(records)})
+    dataset_store.put_json_idempotent(f"{dataset_root}/manifest.json", payload)
+    jobs.append_event(job_id, "stage_completed", {"stage": "finalization", "records_published": len(records)})
     jobs.append_event(job_id, "build_completed", {"record_count": len(records), "dataset_id": dataset_id})
     jobs.set_state(job_id, "completed")
-    return {"run_id": job_id, "job_id": job_id, "dataset_id": dataset_id, "recipe": "knowledge-unit-probed-qa", "record_count": len(records), "dataset_manifest_uri": dataset_store.uri(f"{dataset_root}/manifest.json")}
+    return {**_identity_fields(identity), "recipe": "knowledge-unit-probed-qa", "record_count": len(records), "dataset_manifest_uri": dataset_store.uri(f"{dataset_root}/manifest.json")}
 
 
-def _build_knowledge_unit_staged(*, manifest: dict[str, Any], dataset_name: str, config: DataForgeConfig, runtime: StorageRuntime, jobs: JobRepository, inference_client: Any, dataset_store: Any, dataset_root: str, dataset_id: str, dataset_version: str, input_manifest_uri: str, job_id: str) -> dict[str, Any]:
+def _build_knowledge_unit_staged(*, manifest: dict[str, Any], dataset_name: str, config: DataForgeConfig, runtime: StorageRuntime, jobs: JobRepository, inference_client: Any, dataset_store: Any, dataset_root: str, identity: BuildIdentity, input_manifest_uri: str) -> dict[str, Any]:
+    job_id = identity.job_id
+    dataset_id = identity.dataset_id
+    dataset_version = identity.dataset_version
     prompt_dir = Path(__file__).with_name("prompts")
     knowledge_key = f"{dataset_root}/knowledge-units.jsonl"
     candidates_key = f"{dataset_root}/candidates.jsonl"
@@ -317,13 +339,14 @@ def _build_knowledge_unit_staged(*, manifest: dict[str, Any], dataset_name: str,
     validate_context(manifest, evidence)
     evidence_availability(evidence)
     evidence_by_id = {item.evidence_id: item for item in evidence}
-    identity = {"dataset_name": dataset_name, "dataset_id": dataset_id, "dataset_version": dataset_version, "source_manifest_checksum": checksum(manifest), "configuration_checksum": checksum(asdict(config)), "prompt_versions": dict(config.prompt_versions)}
+    checkpoint_identity = {"dataset_name": dataset_name, **_identity_fields(identity), "source_manifest_checksum": checksum(manifest), "configuration_checksum": checksum(asdict(config)), "prompt_versions": dict(config.prompt_versions)}
     pool = inference_client if isinstance(inference_client, InferenceClientPool) else InferenceClientPool(config=config, injected_client=inference_client)
+    pool.set_lineage(dataset_id=dataset_id, dataset_version=dataset_version, run_id=identity.run_id, job_id=job_id, recipe="knowledge-unit-qa", data_classification=config.data_classification)
     discovery = StructuredAdapter(pool, GeneratorConfig(**asdict(config.knowledge_unit or config.generator)))
     units = [KnowledgeUnit.from_dict(item) for item in _read_jsonl(dataset_store, knowledge_key)]
     jobs.append_event(job_id, "stage_started", {"stage": "discovery"})
     _check_cancel(jobs, job_id, "discovery")
-    if not _completed_checkpoint(dataset_store, dataset_root, "discovery", identity, {}):
+    if not _completed_checkpoint(dataset_store, dataset_root, "discovery", checkpoint_identity, {}):
         for item in evidence:
             _check_cancel(jobs, job_id, "discovery")
             prompt = prompt_dir.joinpath("v1_knowledge_unit_discovery.txt").read_text(encoding="utf-8") + "\n\n" + item.text
@@ -337,13 +360,13 @@ def _build_knowledge_unit_staged(*, manifest: dict[str, Any], dataset_name: str,
         knowledge_bytes = _jsonl([unit.to_dict() for unit in units])
         dataset_store.put_bytes(knowledge_key, knowledge_bytes, media_type="application/x-ndjson")
         dataset_store.put_bytes(f"{dataset_root}/model-calls-discovery.jsonl", _jsonl(calls), media_type="application/x-ndjson")
-        _write_checkpoint(dataset_store, dataset_root, "discovery", identity, {knowledge_key: checksum(knowledge_bytes.decode())}, len(units))
-    jobs.append_event(job_id, "stage_completed", {"stage": "discovery", "row_count": len(units)})
+        _write_checkpoint(dataset_store, dataset_root, "discovery", checkpoint_identity, {knowledge_key: checksum(knowledge_bytes.decode())}, len(units))
+    jobs.append_event(job_id, "stage_completed", {"stage": "discovery", "knowledge_units_created": len(units)})
     qa = StructuredAdapter(pool, GeneratorConfig(**asdict(config.qa_generator or config.generator)))
     candidates = _read_jsonl(dataset_store, candidates_key)
     jobs.append_event(job_id, "stage_started", {"stage": "generation"})
     _check_cancel(jobs, job_id, "generation")
-    if not _completed_checkpoint(dataset_store, dataset_root, "generation", identity, {}):
+    if not _completed_checkpoint(dataset_store, dataset_root, "generation", checkpoint_identity, {}):
         for unit in units:
             _check_cancel(jobs, job_id, "generation")
             cited_evidence = [evidence_by_id[item] for item in unit.source_evidence_ids if item in evidence_by_id]
@@ -360,13 +383,13 @@ def _build_knowledge_unit_staged(*, manifest: dict[str, Any], dataset_name: str,
         candidates_bytes = _jsonl(candidates)
         dataset_store.put_bytes(candidates_key, candidates_bytes, media_type="application/x-ndjson")
         dataset_store.put_bytes(f"{dataset_root}/model-calls-generation.jsonl", _jsonl(calls), media_type="application/x-ndjson")
-        _write_checkpoint(dataset_store, dataset_root, "generation", identity, {candidates_key: checksum(candidates_bytes.decode())}, len(candidates))
-    jobs.append_event(job_id, "stage_completed", {"stage": "generation", "row_count": len(candidates)})
+        _write_checkpoint(dataset_store, dataset_root, "generation", checkpoint_identity, {candidates_key: checksum(candidates_bytes.decode())}, len(candidates))
+    jobs.append_event(job_id, "stage_completed", {"stage": "generation", "records_generated": len(candidates)})
     validator = StructuredAdapter(pool, GeneratorConfig(**asdict(config.validator or config.generator)))
     validations = _read_jsonl(dataset_store, validations_key)
     jobs.append_event(job_id, "stage_started", {"stage": "validation"})
     _check_cancel(jobs, job_id, "validation")
-    if not _completed_checkpoint(dataset_store, dataset_root, "validation", identity, {}):
+    if not _completed_checkpoint(dataset_store, dataset_root, "validation", checkpoint_identity, {}):
         by_id = {unit.knowledge_unit_id: unit for unit in units}
         for candidate in candidates:
             _check_cancel(jobs, job_id, "validation")
@@ -389,10 +412,11 @@ def _build_knowledge_unit_staged(*, manifest: dict[str, Any], dataset_name: str,
         validations_bytes = _jsonl(validations)
         dataset_store.put_bytes(validations_key, validations_bytes, media_type="application/x-ndjson")
         dataset_store.put_bytes(f"{dataset_root}/model-calls-validation.jsonl", _jsonl(calls), media_type="application/x-ndjson")
-        _write_checkpoint(dataset_store, dataset_root, "validation", identity, {validations_key: checksum(validations_bytes.decode())}, len(validations))
-    jobs.append_event(job_id, "stage_completed", {"stage": "validation", "row_count": len(validations)})
+        _write_checkpoint(dataset_store, dataset_root, "validation", checkpoint_identity, {validations_key: checksum(validations_bytes.decode())}, len(validations))
+    jobs.append_event(job_id, "stage_completed", {"stage": "validation", "records_accepted": sum(item.get("decision") == "accept" for item in validations), "records_rejected": sum(item.get("decision") == "reject" for item in validations)})
     accepted = {item["knowledge_unit_id"] for item in validations if item.get("decision") == "accept"}
-    records = [{"record_id": deterministic_id(dataset_id, item["knowledge_unit_id"], item["instruction"], item["answer"]), "messages": [{"role": "user", "content": item["instruction"]}, {"role": "assistant", "content": item["answer"]}], "split": split_for_index(index), "metadata": {"recipe": "knowledge-unit-qa", "source_asset_ids": item.get("source_asset_ids", []), "document_ids": item.get("document_ids", []), "evidence_ids": item["evidence_ids"], "knowledge_unit_id": item["knowledge_unit_id"], "prompt_versions": dict(config.prompt_versions), "generator_model": (config.qa_generator or config.generator).model}} for index, item in enumerate(candidates) if item["knowledge_unit_id"] in accepted]
+    records = [{"record_id": deterministic_id(dataset_id, item["knowledge_unit_id"], item["instruction"], item["answer"]), "messages": [{"role": "user", "content": item["instruction"]}, {"role": "assistant", "content": item["answer"]}], "split": "", "metadata": {"recipe": "knowledge-unit-qa", "source_asset_ids": item.get("source_asset_ids", []), "document_ids": item.get("document_ids", []), "evidence_ids": item["evidence_ids"], "knowledge_unit_id": item["knowledge_unit_id"], "prompt_versions": dict(config.prompt_versions), "generator_model": (config.qa_generator or config.generator).model}} for item in candidates if item["knowledge_unit_id"] in accepted]
+    records, duplicate_count = deduplicate_records(records, split_seed=config.split_seed)
     records_bytes = _jsonl(records)
     rejections_bytes = _jsonl(rejections)
     knowledge_bytes = _jsonl([unit.to_dict() for unit in units])
@@ -401,17 +425,18 @@ def _build_knowledge_unit_staged(*, manifest: dict[str, Any], dataset_name: str,
     dataset_store.put_bytes(rejections_key, rejections_bytes, media_type="application/x-ndjson")
     final_artifacts = {knowledge_key: checksum(knowledge_bytes.decode()), candidates_key: checksum(_jsonl(candidates).decode()), validations_key: checksum(validations_bytes.decode()), records_key: checksum(records_bytes.decode()), rejections_key: checksum(rejections_bytes.decode())}
     jobs.append_event(job_id, "stage_started", {"stage": "finalization"})
-    manifest_payload = {"dataset_id": dataset_id, "dataset_name": dataset_name, "recipe": "knowledge-unit-qa", "dataset_version": dataset_version, "schema_version": "cognityx.dataforge.dataset/v1", "source_manifest_uri": input_manifest_uri, "source_manifest_checksum": checksum(manifest), "configuration_checksum": checksum(asdict(config)), "models": {"knowledge_unit": asdict(config.knowledge_unit or config.generator), "qa_generator": asdict(config.qa_generator or config.generator), "validator": asdict(config.validator or config.generator)}, "prompt_versions": dict(config.prompt_versions), "knowledge_unit_count": len(units), "candidate_count": len(candidates), "accepted_count": len(records), "rejected_count": len(rejections), "train_count": sum(item["split"] == "train" for item in records), "eval_count": sum(item["split"] == "eval" for item in records), "validation_failure_counts": {"rejected": sum(item.get("decision") == "reject" for item in validations)}, "knowledge_units_uri": dataset_store.uri(knowledge_key), "knowledge_units_checksum": final_artifacts[knowledge_key], "validations_uri": dataset_store.uri(validations_key), "validations_checksum": final_artifacts[validations_key], "records_uri": dataset_store.uri(records_key), "records_checksum": final_artifacts[records_key], "run_id": job_id, "job_id": job_id, "model_calls_uri": dataset_store.uri(f"{dataset_root}/model-calls-validation.jsonl")}
+    _check_cancel(jobs, job_id, "finalization")
+    manifest_payload = {**_identity_fields(identity), "dataset_name": dataset_name, "recipe": "knowledge-unit-qa", "schema_version": "cognityx.dataforge.dataset/v1", "source_manifest_uri": input_manifest_uri, "input_selection_uri": dataset_store.uri(f"{identity.run_root}/input-selection.json"), "source_manifest_checksum": checksum(manifest), "configuration_checksum": checksum(asdict(config)), "effective_configuration": asdict(config), "models": {"knowledge_unit": asdict(config.knowledge_unit or config.generator), "qa_generator": asdict(config.qa_generator or config.generator), "validator": asdict(config.validator or config.generator)}, "prompt_versions": dict(config.prompt_versions), "split_seed": config.split_seed, "knowledge_unit_count": len(units), "candidate_count": len(candidates), "accepted_count": len(records), "rejected_count": len(rejections), "duplicate_count": duplicate_count, "truncation_count": sum(item.get("status") == "truncated" for item in calls), "inference_failure_count": sum(item.get("status") == "failed" for item in calls), "train_count": sum(item["split"] == "train" for item in records), "validation_count": sum(item["split"] == "validation" for item in records), "test_count": sum(item["split"] == "test" for item in records), "eval_count": sum(item["split"] != "train" for item in records), "validation_failure_counts": {"rejected": sum(item.get("decision") == "reject" for item in validations)}, "knowledge_units_uri": dataset_store.uri(knowledge_key), "knowledge_units_checksum": final_artifacts[knowledge_key], "validations_uri": dataset_store.uri(validations_key), "validations_checksum": final_artifacts[validations_key], "records_uri": dataset_store.uri(records_key), "records_checksum": final_artifacts[records_key], "model_calls_uri": dataset_store.uri(f"{dataset_root}/model-calls-validation.jsonl")}
+    _write_checkpoint(dataset_store, dataset_root, "finalization", checkpoint_identity, final_artifacts, len(records))
     dataset_store.put_json_idempotent(f"{dataset_root}/manifest.json", manifest_payload)
-    _write_checkpoint(dataset_store, dataset_root, "finalization", identity, final_artifacts, len(records))
-    jobs.append_event(job_id, "stage_completed", {"stage": "finalization", "row_count": len(records)})
+    jobs.append_event(job_id, "stage_completed", {"stage": "finalization", "records_published": len(records)})
     jobs.append_event(job_id, "build_completed", {"record_count": len(records), "dataset_id": dataset_id})
     jobs.set_state(job_id, "completed")
-    return {"run_id": job_id, "job_id": job_id, "dataset_id": dataset_id, "recipe": "knowledge-unit-qa", "record_count": len(records), "dataset_manifest_uri": dataset_store.uri(f"{dataset_root}/manifest.json")}
+    return {**_identity_fields(identity), "recipe": "knowledge-unit-qa", "record_count": len(records), "dataset_manifest_uri": dataset_store.uri(f"{dataset_root}/manifest.json")}
 
 
 def build_dataset(
-    input_manifest_uri: str,
+    input_manifest_uri: str | None,
     dataset_name: str,
     recipe: str | None,
     config_path: str | Path,
@@ -422,21 +447,58 @@ def build_dataset(
     storage_root: str | Path | None = None,
     storage_config: str | Path | None = None,
     variant: str | None = None,
+    source: str | None = None,
+    experiment_id: str | None = None,
+    jobs_database: str | Path | None = None,
 ) -> dict[str, Any]:
     runtime = runtime or _runtime(storage_root, storage_config)
-    jobs = jobs or JobRepository(":memory:")
+    jobs = jobs or (
+        load_job_repository(jobs_database)
+        if jobs_database is not None
+        else JobRepository(":memory:")
+    )
     config = DataForgeConfig.load(config_path)
     recipe = normalize_recipe(recipe, variant=variant)
-    manifest_store, manifest_key = resolve_storage_uri(runtime, input_manifest_uri)
-    with manifest_store.open(manifest_key) as handle:
-        manifest = load_run_manifest(json.load(handle))
-    dataset_id = deterministic_id(dataset_name, recipe)
-    dataset_version = deterministic_id(dataset_name, recipe, checksum(manifest), checksum(asdict(config)), config.generator.model, config.validator.model if config.validator else "", *[f"{key}:{value}" for key, value in sorted(config.prompt_versions.items())])
-    dataset_store = runtime.for_role("dataset")
-    dataset_root = f"{dataset_id}/{dataset_version}"
-    manifest_key = f"{dataset_root}/manifest.json"
-    expected_source_checksum = checksum(manifest)
+    source_ref = source or input_manifest_uri
+    if source_ref is None:
+        raise ValueError("source is required")
+    resolved_source = resolve_source(runtime, source_ref)
+    manifest = resolved_source.source_manifest
+    expected_source_checksum = resolved_source.checksum
     expected_config_checksum = checksum(asdict(config))
+    selected_experiment_id = experiment_id or f"legacy-{deterministic_id(dataset_name)}"
+    identity = BuildIdentity.create(
+        experiment_id=selected_experiment_id,
+        recipe=recipe,
+        configuration_checksum=expected_config_checksum,
+        source_checksum=expected_source_checksum,
+    )
+    if experiment_id is None:
+        legacy_dataset_id = deterministic_id(dataset_name, recipe)
+        legacy_dataset_version = deterministic_id(
+            dataset_name,
+            recipe,
+            expected_source_checksum,
+            expected_config_checksum,
+            config.generator.model,
+            config.validator.model if config.validator else "",
+            *[f"{key}:{value}" for key, value in sorted(config.prompt_versions.items())],
+        )
+        identity = BuildIdentity(
+            experiment_id=identity.experiment_id,
+            variant_id=identity.variant_id,
+            run_id=identity.run_id,
+            job_id=identity.job_id,
+            dataset_id=legacy_dataset_id,
+            dataset_version=legacy_dataset_version,
+        )
+    dataset_store = runtime.for_role("dataset")
+    dataset_root = (
+        identity.dataset_root
+        if experiment_id is not None
+        else f"{identity.dataset_id}/{identity.dataset_version}"
+    )
+    manifest_key = f"{dataset_root}/manifest.json"
     if dataset_store.exists(manifest_key):
         with dataset_store.open(manifest_key) as handle:
             existing = json.load(handle)
@@ -459,11 +521,13 @@ def build_dataset(
         ):
             raise ValueError("Existing immutable dataset does not match this build identity")
         if recipe == "knowledge-unit-qa":
-            checkpoint_identity = {"dataset_name": dataset_name, "dataset_id": dataset_id, "dataset_version": dataset_version, "source_manifest_checksum": expected_source_checksum, "configuration_checksum": expected_config_checksum, "prompt_versions": dict(config.prompt_versions)}
+            with dataset_store.open(_checkpoint_key(dataset_root, "finalization")) as handle:
+                checkpoint_identity = json.load(handle)["identity"]
             if not all(_completed_checkpoint(dataset_store, dataset_root, stage, checkpoint_identity, {}) for stage in ("discovery", "generation", "validation", "finalization")):
                 raise ValueError("Existing staged dataset is incomplete or has invalid checkpoints")
         if recipe == "knowledge-unit-probed-qa":
-            checkpoint_identity = _probed_identity(dataset_name, dataset_id, dataset_version, manifest, config)
+            with dataset_store.open(_checkpoint_key(dataset_root, "finalization")) as handle:
+                checkpoint_identity = json.load(handle)["identity"]
             if not all(_completed_checkpoint(dataset_store, dataset_root, stage, checkpoint_identity, {}) for stage in ("discovery", "student", "judgment", "selection", "qa_generation", "validation", "finalization")):
                 raise ValueError("Existing staged probed dataset is incomplete or has invalid checkpoints")
         return {
@@ -476,38 +540,69 @@ def build_dataset(
             "reused": True,
         }
     job = jobs.create(
-        deterministic_id(dataset_name, recipe, expected_source_checksum, expected_config_checksum),
+        identity.job_id,
         "dataforge.build",
-        {"dataset_name": dataset_name, "recipe": recipe, "source_manifest_uri": input_manifest_uri},
+        {
+            **_identity_fields(identity),
+            "dataset_name": dataset_name,
+            "recipe": recipe,
+            "source": source_ref,
+            "source_manifest_uri": resolved_source.source_manifest_uri,
+            "input_selection_uri": dataset_store.uri(f"{identity.run_root}/input-selection.json"),
+        },
+    )
+    dataset_store.put_json_idempotent(
+        f"{identity.run_root}/input-selection.json",
+        {
+            **resolved_source.selection_manifest,
+            "experiment_id": identity.experiment_id,
+            "variant_id": identity.variant_id,
+            "run_id": identity.run_id,
+            "configuration_checksum": expected_config_checksum,
+        },
     )
     jobs.set_state(job.job_id, "running")
-    jobs.append_event(job.job_id, "build_started", {"run_id": manifest["run_id"]})
+    jobs.append_event(job.job_id, "build_started", {
+        **_identity_fields(identity),
+        "source_run_id": manifest["run_id"],
+    })
+    jobs.append_event(job.job_id, "sources_resolved", {
+        "source_count": len(manifest.get("source_assets", ())),
+        "document_count": len(manifest.get("document_ids", ())),
+        "evidence_ref_count": len(manifest["evidence_refs"]),
+    })
     if recipe == "knowledge-unit-probed-qa":
         try:
-            return _build_knowledge_unit_probed(
+            result = _build_knowledge_unit_probed(
                 manifest=manifest, dataset_name=dataset_name, config=config, runtime=runtime, jobs=jobs,
                 inference_client=InferenceClientPool(config=config, injected_client=inference_client) if inference_client is not None else InferenceClientPool(config=config),
-                dataset_store=dataset_store, dataset_root=dataset_root, dataset_id=dataset_id,
-                dataset_version=dataset_version, input_manifest_uri=input_manifest_uri, job_id=job.job_id,
+                dataset_store=dataset_store, dataset_root=dataset_root, identity=identity,
+                input_manifest_uri=resolved_source.source_manifest_uri,
             )
+            _persist_run_events(dataset_store, identity.run_root, jobs, job.job_id)
+            return result
         except Exception as exc:
             if jobs.get(job.job_id).state != "cancelled":
                 jobs.append_event(job.job_id, "build_failed", {"error": str(exc), "error_type": type(exc).__name__})
                 jobs.set_state(job.job_id, "failed")
+            _persist_run_events(dataset_store, identity.run_root, jobs, job.job_id)
             raise
     if recipe == "knowledge-unit-qa":
         try:
-            return _build_knowledge_unit_staged(
+            result = _build_knowledge_unit_staged(
                 manifest=manifest, dataset_name=dataset_name, config=config, runtime=runtime, jobs=jobs,
                 inference_client=InferenceClientPool(config=config, injected_client=inference_client) if inference_client is not None else InferenceClientPool(config=config),
                 dataset_store=dataset_store, dataset_root=dataset_root,
-                dataset_id=dataset_id, dataset_version=dataset_version,
-                input_manifest_uri=input_manifest_uri, job_id=job.job_id,
+                identity=identity,
+                input_manifest_uri=resolved_source.source_manifest_uri,
             )
+            _persist_run_events(dataset_store, identity.run_root, jobs, job.job_id)
+            return result
         except Exception as exc:
             if jobs.get(job.job_id).state != "cancelled":
                 jobs.append_event(job.job_id, "build_failed", {"error": str(exc), "error_type": type(exc).__name__})
                 jobs.set_state(job.job_id, "failed")
+            _persist_run_events(dataset_store, identity.run_root, jobs, job.job_id)
             raise
     try:
         evidence_groups = []
@@ -521,6 +616,14 @@ def build_dataset(
         validate_context(manifest, evidence)
         evidence_availability(evidence)
         pool = InferenceClientPool(config=config, injected_client=inference_client)
+        pool.set_lineage(
+            dataset_id=identity.dataset_id,
+            dataset_version=identity.dataset_version,
+            run_id=identity.run_id,
+            job_id=identity.job_id,
+            recipe=recipe,
+            data_classification=config.data_classification,
+        )
         generator = GeneratorAdapter(pool, GeneratorConfig(**asdict(config.generator)))
         structured = StructuredAdapter(pool, GeneratorConfig(**asdict(config.generator)))
         validator_config = config.validator or config.generator
@@ -530,8 +633,10 @@ def build_dataset(
         rejections: list[dict[str, Any]] = []
         validations: list[dict[str, Any]] = []
         knowledge_units: list[KnowledgeUnit] = []
+        calls: list[dict[str, Any]] = []
         prompt_dir = Path(__file__).with_name("prompts")
         prompt_template = prompt_dir.joinpath("v0_instruction_answer.txt").read_text(encoding="utf-8")
+        jobs.append_event(job.job_id, "stage_started", {"stage": "generation"})
         for item in evidence:
             units = ()
             if recipe == "knowledge-unit-qa":
@@ -556,7 +661,14 @@ def build_dataset(
                         generation_prompt = prompt_dir.joinpath("v1_knowledge_unit_generation.txt").read_text(encoding="utf-8")
                         generated = generator.generate(generation_prompt + "\n\n" + text)
                     else:
-                        generated = generator.generate(prompt_template + "\n\n" + text)
+                        generated = generator.generate_budgeted(
+                            prompt_template + "\n\n" + text,
+                            context_limit=config.context_limit_tokens,
+                            role="generator",
+                            prompt_version=config.prompt_versions["generation"],
+                            evidence_ids=[item.evidence_id],
+                            calls=calls,
+                        )
                 except Exception as exc:
                     rejections.append({**candidate, "reason": str(exc)})
                     continue
@@ -585,7 +697,7 @@ def build_dataset(
                 record = DatasetRecord(
                     record_id=deterministic_id(dataset_name, recipe, item.evidence_id, str(start), str(end), generated["instruction"], generated["answer"]),
                     messages=({"role": "user", "content": generated["instruction"]}, {"role": "assistant", "content": generated["answer"]}),
-                    split=split_for_index(len(records)),
+                    split="",
                     metadata={
                         "recipe": recipe,
                         "source_asset_ids": [item.source_asset_id] if item.source_asset_id else [],
@@ -595,34 +707,49 @@ def build_dataset(
                         "char_end": end,
                         "generator_model": config.generator.model,
                         "prompt_versions": dict(config.prompt_versions),
+                        "request_metadata": dict(calls[-1]) if calls else {},
                         **({"knowledge_unit_id": unit.knowledge_unit_id} if unit is not None else {}),
                     },
                 )
                 records.append(record)
-        records_payload = [record.to_dict() for record in records]
+        jobs.append_event(job.job_id, "stage_completed", {
+            "stage": "generation",
+            "records_generated": len(records),
+            "records_rejected": len(rejections),
+        })
+        records_payload, duplicate_count = deduplicate_records(
+            [record.to_dict() for record in records],
+            split_seed=config.split_seed,
+        )
         candidates_bytes = _jsonl(candidates)
         records_bytes = _jsonl(records_payload)
         rejections_bytes = _jsonl(rejections)
         knowledge_units_bytes = _jsonl([unit.to_dict() for unit in knowledge_units])
         validations_bytes = _jsonl(validations)
+        model_calls_bytes = _jsonl(calls)
         records_key = f"{dataset_root}/records.jsonl"
         manifest_payload = {
-            "dataset_id": dataset_id,
+            **_identity_fields(identity),
             "dataset_name": dataset_name,
             "recipe": recipe,
-            "dataset_version": dataset_version,
-            "source_manifest_uri": input_manifest_uri,
+            "source_manifest_uri": resolved_source.source_manifest_uri,
+            "input_selection_uri": dataset_store.uri(f"{identity.run_root}/input-selection.json"),
             "source_manifest_checksum": expected_source_checksum,
             "configuration_checksum": expected_config_checksum,
+            "effective_configuration": asdict(config),
             "generator": asdict(config.generator),
             "schema_version": "cognityx.dataforge.dataset/v1",
             "prompt_versions": dict(config.prompt_versions),
+            "split_seed": config.split_seed,
             "knowledge_unit_count": len(knowledge_units),
             "candidate_count": len(candidates),
-            "accepted_count": len(records),
+            "accepted_count": len(records_payload),
             "rejected_count": len(rejections),
-            "train_count": sum(record.split == "train" for record in records),
-            "eval_count": sum(record.split == "eval" for record in records),
+            "duplicate_count": duplicate_count,
+            "train_count": sum(record["split"] == "train" for record in records_payload),
+            "validation_count": sum(record["split"] == "validation" for record in records_payload),
+            "test_count": sum(record["split"] == "test" for record in records_payload),
+            "eval_count": sum(record["split"] != "train" for record in records_payload),
             "records_uri": dataset_store.uri(records_key),
             "records_checksum": checksum(records_bytes.decode("utf-8")),
             "knowledge_units_uri": dataset_store.uri(f"{dataset_root}/knowledge-units.jsonl"),
@@ -630,25 +757,33 @@ def build_dataset(
             "validations_uri": dataset_store.uri(f"{dataset_root}/validations.jsonl"),
             "validations_checksum": checksum(validations_bytes.decode("utf-8")),
             "validation_failure_counts": {"rejected": sum(item.get("decision") == "reject" for item in validations)},
-            "run_id": job.job_id,
-            "job_id": job.job_id,
+            "model_calls_uri": dataset_store.uri(f"{dataset_root}/model-calls.jsonl"),
+            "inference_failure_count": sum(item.get("status") == "failed" for item in calls),
+            "truncation_count": sum(item.get("status") == "truncated" for item in calls),
             "created_at": time.time(),
         }
-        dataset_store.put_json_idempotent(f"{dataset_root}/manifest.json", manifest_payload)
         dataset_store.put_bytes(records_key, records_bytes, media_type="application/x-ndjson")
         dataset_store.put_bytes(f"{dataset_root}/candidates.jsonl", candidates_bytes, media_type="application/x-ndjson")
         dataset_store.put_bytes(f"{dataset_root}/rejections.jsonl", rejections_bytes, media_type="application/x-ndjson")
         dataset_store.put_bytes(f"{dataset_root}/knowledge-units.jsonl", knowledge_units_bytes, media_type="application/x-ndjson")
         dataset_store.put_bytes(f"{dataset_root}/validations.jsonl", validations_bytes, media_type="application/x-ndjson")
-        jobs.append_event(job.job_id, "build_completed", {"record_count": len(records), "dataset_id": dataset_id})
+        dataset_store.put_bytes(f"{dataset_root}/model-calls.jsonl", model_calls_bytes, media_type="application/x-ndjson")
+        _check_cancel(jobs, job.job_id, "publication")
+        jobs.append_event(job.job_id, "stage_started", {"stage": "publication"})
+        dataset_store.put_json_idempotent(f"{dataset_root}/manifest.json", manifest_payload)
+        jobs.append_event(job.job_id, "stage_completed", {"stage": "publication", "records_published": len(records_payload)})
+        jobs.append_event(job.job_id, "build_completed", {"record_count": len(records_payload), "dataset_id": identity.dataset_id})
         jobs.set_state(job.job_id, "completed")
-        dataset_store.put_bytes(f"{dataset_root}/run-events.jsonl", _jsonl(jobs.events(job.job_id)), media_type="application/x-ndjson")
-        return {"run_id": job.job_id, "job_id": job.job_id, "dataset_id": dataset_id, "recipe": recipe, "record_count": len(records), "dataset_manifest_uri": dataset_store.uri(f"{dataset_root}/manifest.json")}
+        _persist_run_events(dataset_store, identity.run_root, jobs, job.job_id)
+        return {**_identity_fields(identity), "recipe": recipe, "record_count": len(records_payload), "dataset_manifest_uri": dataset_store.uri(f"{dataset_root}/manifest.json")}
     except KeyboardInterrupt:
         jobs.append_event(job.job_id, "build_cancelled", {})
         jobs.set_state(job.job_id, "cancelled")
+        _persist_run_events(dataset_store, identity.run_root, jobs, job.job_id)
         raise RuntimeError("DataForge build cancelled")
     except Exception as exc:
-        jobs.append_event(job.job_id, "build_failed", {"error": str(exc), "error_type": type(exc).__name__})
-        jobs.set_state(job.job_id, "failed")
+        if jobs.get(job.job_id).state != "cancelled":
+            jobs.append_event(job.job_id, "build_failed", {"error": str(exc), "error_type": type(exc).__name__})
+            jobs.set_state(job.job_id, "failed")
+        _persist_run_events(dataset_store, identity.run_root, jobs, job.job_id)
         raise

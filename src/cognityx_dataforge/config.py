@@ -41,6 +41,7 @@ class DataForgeConfig:
     probes_per_unit: int = 2
     include_classes: tuple[str, ...] = ("partial", "unknown")
     known_sample_rate: float = 0.0
+    split_seed: str = "dataforge-v1"
 
     def __post_init__(self) -> None:
         if self.prompt_versions is None:
@@ -114,4 +115,5 @@ class DataForgeConfig:
             probes_per_unit=int(probing.get("probes_per_unit", 2)),
             include_classes=tuple(str(item) for item in probing.get("include_classes", ("partial", "unknown"))),
             known_sample_rate=float(probing.get("known_sample_rate", 0.0)),
+            split_seed=str(payload.get("splitting", {}).get("seed", "dataforge-v1")),
         )

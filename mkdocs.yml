@@ -11,4 +11,5 @@ strict: true
 nav:
   - Home: index.md
   - Introduction: introduction.md
+  - Research variants: variants.md
   - Reference: reference.md

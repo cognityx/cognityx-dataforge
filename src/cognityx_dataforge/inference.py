@@ -189,13 +189,35 @@ class StructuredAdapter:
         supported = set(parameter_policy.get("supported", ()))
         if capabilities.get("structured_output") is True and (not supported or "response_format" in supported):
             kwargs["response_format"] = {"type": "json_object"}
+        lineage = {
+            "role": role,
+            "provider": self.config.provider,
+            "model": self.config.model,
+            "backend": self.config.backend if self.config.provider == "local" else None,
+            "profile": self.config.profile if self.config.provider == "local" else None,
+            "server_profile": self.config.server_profile if self.config.provider == "local" else None,
+            "generation_settings": {
+                "max_output_tokens": self.config.max_output_tokens,
+                "structured_output": "response_format" in kwargs,
+            },
+            "prompt_version": prompt_version,
+            "evidence_ids": list(evidence_ids),
+            "history_mode": "none",
+        }
         try:
             response = self._client().chat(**kwargs)
         except Exception as exc:
             detail = str(exc)
+            category = normalized_error_category(exc)
+            calls.append({
+                **lineage,
+                "status": "failed",
+                "failure_category": category,
+                "failure": detail,
+            })
             if "context" in detail.lower() or "token" in detail.lower() or getattr(exc, "status", None) == 422:
                 raise TokenBudgetError(detail) from exc
-            raise RuntimeError(f"Inference request failed [{normalized_error_category(exc)}]: {exc}") from exc
+            raise RuntimeError(f"Inference request failed [{category}]: {exc}") from exc
         if self.config.provider == "local" and context_limit is not None and self.config.max_output_tokens is not None:
             budget = (response.get("cognityx", {}) if isinstance(response, dict) else {}).get("token_budget")
             if budget is None:
@@ -203,8 +225,14 @@ class StructuredAdapter:
                 if counter is not None:
                     counted = normalize_input_token_count(counter(model=self.config.model, messages=messages, backend=self.config.backend or "vllm", profile=self.config.profile or "bf16"))
                     if counted is not None and counted + self.config.max_output_tokens > context_limit:
+                        calls.append({
+                            **lineage,
+                            "status": "truncated",
+                            "input_tokens": counted,
+                            "context_limit": context_limit,
+                        })
                         raise TokenBudgetError("Model request exceeds context budget", input_tokens=counted, max_output_tokens=self.config.max_output_tokens, context_limit=context_limit)
-        calls.append({**response_metadata(response, self.config, role), "profile_state": policy.get("profile_state", "configured"), "verification_source": policy.get("verification_source"), "capability_snapshot": capabilities, "parameter_policy": parameter_policy, "prompt_version": prompt_version, "evidence_ids": list(evidence_ids)})
+        calls.append({**lineage, **response_metadata(response, self.config, role), "status": "completed", "profile_state": policy.get("profile_state", "configured"), "verification_source": policy.get("verification_source"), "capability_snapshot": capabilities, "parameter_policy": parameter_policy})
         return _content(response)
 
 
@@ -218,6 +246,33 @@ class GeneratorAdapter:
         if not isinstance(data, dict) or not data.get("instruction") or not data.get("answer"):
             raise ValueError("Incomplete generator output")
         return {"instruction": str(data["instruction"]).strip(), "answer": str(data["answer"]).strip()}
+
+    def generate_budgeted(
+        self,
+        prompt: str,
+        *,
+        context_limit: int | None,
+        role: str,
+        prompt_version: str,
+        evidence_ids: list[str],
+        calls: list[dict[str, Any]],
+    ) -> dict[str, str]:
+        raw = self.adapter.ask_budgeted(
+            prompt,
+            "Return strict JSON with keys instruction and answer.",
+            context_limit=context_limit,
+            role=role,
+            prompt_version=prompt_version,
+            evidence_ids=evidence_ids,
+            calls=calls,
+        )
+        data = json.loads(raw)
+        if not isinstance(data, dict) or not data.get("instruction") or not data.get("answer"):
+            raise ValueError("Incomplete generator output")
+        return {
+            "instruction": str(data["instruction"]).strip(),
+            "answer": str(data["answer"]).strip(),
+        }
 
 
 def load_inference_client() -> Any:
