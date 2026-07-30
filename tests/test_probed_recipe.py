@@ -43,8 +43,10 @@ def test_probed_recipe_selects_unknown_and_keeps_student_prompt_evidence_free(tm
     root = f"{result['dataset_id']}/{version}"
     with dataset.open(f"{root}/records.jsonl") as handle:
         records = [json.loads(line) for line in handle if line.strip()]
-    assert len(records) == 2
+    assert len(records) == 1
     assert all(record["metadata"]["probe_class"] == "unknown" for record in records)
+    with dataset.open(f"{root}/manifest.json") as handle:
+        assert json.load(handle)["duplicate_count"] == 1
     student_calls = [call for call in client.calls if "own knowledge" in call["messages"][0]["content"]]
     assert len(student_calls) == 2
     assert all("Water freezes" not in call["messages"][1]["content"] for call in student_calls)

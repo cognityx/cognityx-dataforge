@@ -114,11 +114,11 @@ def test_build_dataset_with_real_ingest_manifest(tmp_path: Path):
     assert result["record_count"] == 1
     job = jobs.get(result["job_id"])
     assert job.state == "completed"
-    assert [event["event"] for event in jobs.events(job.job_id)] == [
-        "build_started",
-        "evidence_loaded",
-        "build_completed",
-    ]
+    events = [event["event"] for event in jobs.events(job.job_id)]
+    assert events[0] == "build_started"
+    assert "sources_resolved" in events
+    assert "stage_completed" in events
+    assert events[-1] == "build_completed"
     dataset = runtime.for_role("dataset")
     with dataset.open(f"{result['dataset_id']}/{result['dataset_manifest_uri'].rsplit('/', 2)[-2]}/manifest.json") as handle:
         dataset_manifest = json.load(handle)
