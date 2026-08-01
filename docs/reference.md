@@ -22,7 +22,10 @@ cognityx-dataforge build paragraph-qa \
 
 `--source` accepts a Storage URI for a completed Ingest run manifest or an
 existing `cognityx.dataforge.input-selection/v1` manifest. DataForge persists a
-normalized `input-selection.json` for reproducibility.
+normalized `input-selection.json` for reproducibility. Current Ingest runs also
+provide page, block, section, object and parser-decision details. DataForge
+validates these details directly from Storage and never reads `source.pdf` or
+another copy of the original SourceAsset.
 
 `--input-manifest` remains a deprecated compatibility alias for `--source`.
 Bundle, context and document identifiers are not accepted directly yet because
@@ -83,6 +86,37 @@ seed = "experiment-2026-01"
 Related records share a split group based on source asset, then document,
 knowledge unit or evidence identity. Manifests record accepted, rejected,
 duplicate, truncation and inference-failure counts.
+
+Generated records retain the stable source anchors supplied by Ingest. They
+also carry an enrichment identity computed from the source content hash,
+anchors, representation type, generation method, model version and effective
+configuration. Equivalent future work can use this identity to find an
+existing artifact before running another model call.
+
+## Deletion and cleanup
+
+Deleting a source in Ingest is a logical deletion first: it hides the
+SourceAsset or bundle but does not immediately erase shared bytes. Cognityx
+Storage keeps content-addressed blobs while any live reference still needs
+them. DataForge datasets remain immutable records of the source selection used
+at build time.
+
+An always-running Storage cleanup service is planned. It will remove blobs only
+after retention rules have passed and Storage confirms that no live reference
+remains. Until that service exists, cleanup is an explicit maintenance action;
+DataForge does not delete source blobs or bypass Storage safety checks.
+
+## Future roadmap
+
+The following work is intentionally deferred:
+
+- reference-only external URIs that are ingested without copying source bytes;
+- durable distributed workers for Ingest and DataForge jobs;
+- the always-running Storage cleanup service described above; and
+- materialized vector, late-interaction, keyword, graph and SQL indexes.
+
+The stable anchors and enrichment identity are the handoff for that future
+retrieval work. This release does not create embeddings or indexes.
 
 ## Export
 

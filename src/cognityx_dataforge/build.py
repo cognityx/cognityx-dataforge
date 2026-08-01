@@ -7,6 +7,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+from cognityx_ingest import EnrichmentIdentity
 from cognityx_jobs import JobRepository
 from cognityx_storage import StorageConfig, StorageRuntime
 
@@ -30,6 +31,34 @@ from cognityx_dataforge.paragraphs import paragraph_spans
 from cognityx_dataforge.recipes import normalize_recipe
 from cognityx_dataforge.execution import BuildIdentity, load_job_repository
 from cognityx_dataforge.source import resolve_source, resolve_storage_uri
+
+
+def _source_anchor_ids(evidence: list[Any]) -> list[str]:
+    return list(dict.fromkeys(
+        str(value)
+        for item in evidence
+        for value in (item.anchor_id, item.block_id)
+        if value
+    ))
+
+
+def _enrichment_id(
+    evidence: list[Any],
+    *,
+    representation_type: str,
+    generation_method: str,
+    model_version: str | None,
+    configuration: dict[str, Any],
+) -> str:
+    source_hashes = sorted({item.source_sha256 for item in evidence if item.source_sha256})
+    return EnrichmentIdentity.create(
+        source_content_hash=checksum(source_hashes),
+        source_anchor_ids=tuple(_source_anchor_ids(evidence)),
+        representation_type=representation_type,
+        generation_method=generation_method,
+        model_version=model_version,
+        configuration=configuration,
+    ).enrichment_id
 
 
 def _runtime(root: str | Path | None, config_path: str | Path | None) -> StorageRuntime:
@@ -303,6 +332,20 @@ def _build_knowledge_unit_probed(*, manifest: dict[str, Any], dataset_name: str,
 
     accepted = [item for item in validations if item.get("decision") == "accept"]
     records = [{"record_id": deterministic_id(dataset_id, item["probe_judgment_id"], item["instruction"], item["answer"]), "messages": [{"role": "user", "content": item["instruction"]}, {"role": "assistant", "content": item["answer"]}], "split": "", "metadata": {**{key: item.get(key, []) for key in ("source_asset_ids", "document_ids", "evidence_ids")}, "knowledge_unit_id": item["knowledge_unit_id"], "probe_id": item["probe_id"], "probe_class": item["probe_class"], "probe_judgment_id": item["probe_judgment_id"], "selection_reason": item.get("selection_reason", "configured_probe_class"), "student_model": item.get("student_model", asdict(_role_config(config, "student"))), "student_response_id": item.get("student_response_id"), "recipe": "knowledge-unit-probed-qa"}} for item in accepted]
+    for record in records:
+        cited = [
+            evidence_by_id[item]
+            for item in record["metadata"]["evidence_ids"]
+            if item in evidence_by_id
+        ]
+        record["metadata"]["source_anchor_ids"] = _source_anchor_ids(cited)
+        record["metadata"]["enrichment_id"] = _enrichment_id(
+            cited,
+            representation_type="training-record",
+            generation_method="knowledge-unit-probed-qa",
+            model_version=_role_config(config, "qa_generator").model,
+            configuration=asdict(config),
+        )
     records, duplicate_count = deduplicate_records(records, split_seed=config.split_seed)
     dataset_store.put_bytes(keys["records"], _jsonl(records), media_type="application/x-ndjson")
     dataset_store.put_bytes(keys["rejections"], _jsonl(rejections), media_type="application/x-ndjson")
@@ -310,6 +353,7 @@ def _build_knowledge_unit_probed(*, manifest: dict[str, Any], dataset_name: str,
     jobs.append_event(job_id, "stage_started", {"stage": "finalization"})
     _check_cancel(jobs, job_id, "finalization")
     payload = {**_identity_fields(identity), "dataset_name": dataset_name, "recipe": "knowledge-unit-probed-qa", "schema_version": "cognityx.dataforge.dataset/v1", "source_manifest_uri": input_manifest_uri, "input_selection_uri": dataset_store.uri(f"{identity.run_root}/input-selection.json"), "source_manifest_checksum": checksum(manifest), "configuration_checksum": checksum(asdict(config)), "effective_configuration": asdict(config), "models": {name: asdict(getattr(config, name) or config.generator) for name in ("knowledge_unit", "probe_generator", "student", "probe_judge", "qa_generator", "validator")}, "probing": {"probes_per_unit": config.probes_per_unit, "include_classes": list(config.include_classes), "known_sample_rate": config.known_sample_rate}, "prompt_versions": dict(config.prompt_versions), "split_seed": config.split_seed, "probe_count": len(probes), "judgment_count": len(judgments), "selected_count": len(selected), "accepted_count": len(records), "rejected_count": len(rejections), "duplicate_count": duplicate_count, "truncation_count": sum(item.get("status") == "truncated" for item in calls), "inference_failure_count": sum(item.get("status") == "failed" for item in calls), "train_count": sum(item["split"] == "train" for item in records), "validation_count": sum(item["split"] == "validation" for item in records), "test_count": sum(item["split"] == "test" for item in records), "records_uri": dataset_store.uri(keys["records"]), "records_checksum": final_artifacts[keys["records"]]}
+    payload["provenance_refs"] = list(manifest.get("provenance_refs", ()))
     checkpoint("finalization", list(final_artifacts), len(records))
     dataset_store.put_json_idempotent(f"{dataset_root}/manifest.json", payload)
     jobs.append_event(job_id, "stage_completed", {"stage": "finalization", "records_published": len(records)})
@@ -416,6 +460,20 @@ def _build_knowledge_unit_staged(*, manifest: dict[str, Any], dataset_name: str,
     jobs.append_event(job_id, "stage_completed", {"stage": "validation", "records_accepted": sum(item.get("decision") == "accept" for item in validations), "records_rejected": sum(item.get("decision") == "reject" for item in validations)})
     accepted = {item["knowledge_unit_id"] for item in validations if item.get("decision") == "accept"}
     records = [{"record_id": deterministic_id(dataset_id, item["knowledge_unit_id"], item["instruction"], item["answer"]), "messages": [{"role": "user", "content": item["instruction"]}, {"role": "assistant", "content": item["answer"]}], "split": "", "metadata": {"recipe": "knowledge-unit-qa", "source_asset_ids": item.get("source_asset_ids", []), "document_ids": item.get("document_ids", []), "evidence_ids": item["evidence_ids"], "knowledge_unit_id": item["knowledge_unit_id"], "prompt_versions": dict(config.prompt_versions), "generator_model": (config.qa_generator or config.generator).model}} for item in candidates if item["knowledge_unit_id"] in accepted]
+    for record in records:
+        cited = [
+            evidence_by_id[item]
+            for item in record["metadata"]["evidence_ids"]
+            if item in evidence_by_id
+        ]
+        record["metadata"]["source_anchor_ids"] = _source_anchor_ids(cited)
+        record["metadata"]["enrichment_id"] = _enrichment_id(
+            cited,
+            representation_type="training-record",
+            generation_method="knowledge-unit-qa",
+            model_version=(config.qa_generator or config.generator).model,
+            configuration=asdict(config),
+        )
     records, duplicate_count = deduplicate_records(records, split_seed=config.split_seed)
     records_bytes = _jsonl(records)
     rejections_bytes = _jsonl(rejections)
@@ -427,6 +485,7 @@ def _build_knowledge_unit_staged(*, manifest: dict[str, Any], dataset_name: str,
     jobs.append_event(job_id, "stage_started", {"stage": "finalization"})
     _check_cancel(jobs, job_id, "finalization")
     manifest_payload = {**_identity_fields(identity), "dataset_name": dataset_name, "recipe": "knowledge-unit-qa", "schema_version": "cognityx.dataforge.dataset/v1", "source_manifest_uri": input_manifest_uri, "input_selection_uri": dataset_store.uri(f"{identity.run_root}/input-selection.json"), "source_manifest_checksum": checksum(manifest), "configuration_checksum": checksum(asdict(config)), "effective_configuration": asdict(config), "models": {"knowledge_unit": asdict(config.knowledge_unit or config.generator), "qa_generator": asdict(config.qa_generator or config.generator), "validator": asdict(config.validator or config.generator)}, "prompt_versions": dict(config.prompt_versions), "split_seed": config.split_seed, "knowledge_unit_count": len(units), "candidate_count": len(candidates), "accepted_count": len(records), "rejected_count": len(rejections), "duplicate_count": duplicate_count, "truncation_count": sum(item.get("status") == "truncated" for item in calls), "inference_failure_count": sum(item.get("status") == "failed" for item in calls), "train_count": sum(item["split"] == "train" for item in records), "validation_count": sum(item["split"] == "validation" for item in records), "test_count": sum(item["split"] == "test" for item in records), "eval_count": sum(item["split"] != "train" for item in records), "validation_failure_counts": {"rejected": sum(item.get("decision") == "reject" for item in validations)}, "knowledge_units_uri": dataset_store.uri(knowledge_key), "knowledge_units_checksum": final_artifacts[knowledge_key], "validations_uri": dataset_store.uri(validations_key), "validations_checksum": final_artifacts[validations_key], "records_uri": dataset_store.uri(records_key), "records_checksum": final_artifacts[records_key], "model_calls_uri": dataset_store.uri(f"{dataset_root}/model-calls-validation.jsonl")}
+    manifest_payload["provenance_refs"] = list(manifest.get("provenance_refs", ()))
     _write_checkpoint(dataset_store, dataset_root, "finalization", checkpoint_identity, final_artifacts, len(records))
     dataset_store.put_json_idempotent(f"{dataset_root}/manifest.json", manifest_payload)
     jobs.append_event(job_id, "stage_completed", {"stage": "finalization", "records_published": len(records)})
@@ -570,6 +629,7 @@ def build_dataset(
         "source_count": len(manifest.get("source_assets", ())),
         "document_count": len(manifest.get("document_ids", ())),
         "evidence_ref_count": len(manifest["evidence_refs"]),
+        "provenance_ref_count": len(resolved_source.provenance),
     })
     if recipe == "knowledge-unit-probed-qa":
         try:
@@ -703,6 +763,14 @@ def build_dataset(
                         "source_asset_ids": [item.source_asset_id] if item.source_asset_id else [],
                         "document_ids": [item.document_id],
                         "evidence_ids": [item.evidence_id],
+                        "source_anchor_ids": _source_anchor_ids([item]),
+                        "enrichment_id": _enrichment_id(
+                            [item],
+                            representation_type="training-record",
+                            generation_method=recipe,
+                            model_version=config.generator.model,
+                            configuration=asdict(config),
+                        ),
                         "char_start": start,
                         "char_end": end,
                         "generator_model": config.generator.model,
@@ -735,6 +803,10 @@ def build_dataset(
             "source_manifest_uri": resolved_source.source_manifest_uri,
             "input_selection_uri": dataset_store.uri(f"{identity.run_root}/input-selection.json"),
             "source_manifest_checksum": expected_source_checksum,
+            "provenance_refs": list(manifest.get("provenance_refs", ())),
+            "provenance_checksums": resolved_source.selection_manifest.get(
+                "provenance_checksums", {}
+            ),
             "configuration_checksum": expected_config_checksum,
             "effective_configuration": asdict(config),
             "generator": asdict(config.generator),

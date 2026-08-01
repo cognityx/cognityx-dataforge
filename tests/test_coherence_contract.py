@@ -85,6 +85,9 @@ def _fixture(tmp_path: Path):
         "text": "Alpha is the first value.",
         "char_start": 0,
         "char_end": 25,
+        "anchor_id": "document-1:page-index:0",
+        "block_id": "document-1:block:0",
+        "source_sha256": "sha-1",
         "context_id": "context-1",
         "run_id": "ingest-run-1",
     }
@@ -93,15 +96,37 @@ def _fixture(tmp_path: Path):
         (json.dumps(evidence) + "\n").encode(),
         media_type="application/x-ndjson",
     ).uri
+    provenance_uri = artifact.put_json(
+        "ingest/documents/document-1/provenance.json",
+        {
+            "schema": "cognityx.ingest.provenance",
+            "schema_version": "cognityx.ingest.provenance/v1",
+            "document_id": "document-1",
+            "source_asset": {
+                "asset_id": "asset-1",
+                "blob_sha256": "sha-1",
+            },
+            "evidence": [evidence],
+            "pages": [{"page_id": "document-1:page-index:0"}],
+            "blocks": [{"block_id": "document-1:block:0"}],
+            "sections": [],
+            "objects": [],
+            "relations": [],
+            "decisions": [],
+            "unresolved": [],
+            "parser": {"selected": "fixture"},
+        },
+    ).uri
     manifest_uri = artifact.put_json(
         "ingest/runs/ingest-run-1/manifest.json",
         {
             "schema": "cognityx.ingest.run",
             "run_id": "ingest-run-1",
             "context_id": "context-1",
-            "source_assets": [{"asset_id": "asset-1"}],
+            "source_assets": [{"asset_id": "asset-1", "sha256": "sha-1"}],
             "document_ids": ["document-1"],
             "evidence_refs": [evidence_uri],
+            "provenance_refs": [provenance_uri],
         },
     ).uri
     config = tmp_path / "dataforge.toml"
@@ -137,6 +162,11 @@ def test_default_storage_configuration_and_source_selection(tmp_path, monkeypatc
     fixture_runtime, manifest_uri, _ = _fixture(tmp_path)
     resolved = resolve_source(fixture_runtime, manifest_uri)
     assert resolved.selection_manifest["source_manifest_uri"] == manifest_uri
+    assert resolved.evidence_anchor_ids["evidence-1"] == (
+        "document-1:page-index:0",
+        "document-1:block:0",
+    )
+    assert resolved.selection_manifest["provenance_checksums"]
     selection_uri = fixture_runtime.for_role("artifact").put_json(
         "selections/one.json",
         resolved.selection_manifest,
@@ -176,6 +206,12 @@ def test_identity_lineage_selection_and_manifest_written_last(tmp_path):
     with dataset.open(manifest_key.removesuffix("manifest.json") + "records.jsonl") as handle:
         record = json.loads(handle.readline())
     assert record["metadata"]["request_metadata"]["request_id"] == "request-123"
+    assert record["metadata"]["source_anchor_ids"] == [
+        "document-1:page-index:0",
+        "document-1:block:0",
+    ]
+    assert record["metadata"]["enrichment_id"].startswith("enr-")
+    assert manifest["provenance_refs"]
     publication_writes = [
         key for key in recording.writes
         if key.startswith(manifest_key.rsplit("/", 1)[0] + "/")
