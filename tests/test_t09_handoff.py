@@ -13,6 +13,7 @@ from cognityx_ingest import (
     ProvenanceAddressResolver,
     SegmentationViewSet,
     SourceGraphBuilder,
+    SourceGraphRevisionError,
     build_strong_address_catalog,
 )
 from cognityx_storage import (
@@ -109,6 +110,65 @@ def test_strict_public_t08_artifact_loading_from_storage(tmp_path: Path) -> None
     assert loaded.source_graph.graph_revision == graph.graph_revision
     assert loaded.canonical_node_text("pol-p2").startswith("The ordinary approval")
     assert not artifact_store.exists("t09/parser/raw.json")
+
+
+def test_loader_rejects_stale_production_graph_before_generation(
+    tmp_path: Path,
+) -> None:
+    """Inherit T08 revision proof through the normal document loading boundary.
+
+    The consumer regression builds valid public T08 artifacts, changes one
+    persisted resource hash without changing the production graph revision, and
+    asks ``ValidatedEvidenceBundle.load_document`` to read the stored bytes. The
+    strict Ingest reader must fail before catalog use or DataForge generation;
+    parser-native and original-source objects are deliberately absent. This test
+    performs only temporary configured Storage I/O and changes no fixture or
+    production state.
+    """
+    runtime = StorageRuntime.from_config(
+        StorageConfig.built_in(root=tmp_path / "stale-graph-storage")
+    )
+    artifact_store = runtime.for_role("artifact")
+    canonical = frozen_canonical_artifact()
+    graph = SourceGraphBuilder().build((canonical,))
+    catalog = build_strong_address_catalog(graph, (canonical,))
+    graph_value = json.loads(graph.to_json_bytes())
+    graph_value["resources"][0]["source_sha256"] = "0" * 64
+
+    canonical_uri = artifact_store.put_bytes(
+        "tampered/canonical-content.json",
+        canonical.to_json_bytes(),
+        media_type="application/json",
+    ).uri
+    graph_uri = artifact_store.put_bytes(
+        "tampered/source-graph.json",
+        json.dumps(graph_value, sort_keys=True).encode("utf-8"),
+        media_type="application/json",
+    ).uri
+    catalog_uri = artifact_store.put_bytes(
+        "tampered/provenance-addresses.json",
+        catalog.to_json_bytes(),
+        media_type="application/json",
+    ).uri
+    source = ResolvedV32SourceBundle(
+        (
+            ResolvedV32Document(
+                document_id=canonical.document_id,
+                provenance_uri="storage://shared/tampered/provenance.json",
+                canonical_content_uri=canonical_uri,
+                source_graph_uri=graph_uri,
+                provenance_addresses_uri=catalog_uri,
+            ),
+        )
+    )
+    generator = FrozenQuestionAnswerGenerator()
+
+    with pytest.raises(SourceGraphRevisionError, match="does not match"):
+        ValidatedEvidenceBundle.load_document(runtime, source, canonical.document_id)
+
+    assert generator.calls == []
+    assert not artifact_store.exists("tampered/parser/native.json")
+    assert not artifact_store.exists("tampered/source/original.bin")
 
 
 def test_bundle_rejects_resource_hash_and_address_revision_mismatches() -> None:

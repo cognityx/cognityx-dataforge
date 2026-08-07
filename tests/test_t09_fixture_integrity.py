@@ -15,7 +15,7 @@ def test_vendored_t09_fixture_manifest_matches_exact_bytes() -> None:
     )
     assert manifest["upstream_repository"] == "cognityx/cognityx-ingest"
     assert manifest["upstream_t08_merge_sha"] == (
-        "dc0e8757392ed490118893c8956bb4f6b82f5e13"
+        "2de38bb6826c64df96a918cef6895c7ada400966"
     )
     assert set(manifest["files"]) == {
         "expected/canonical_content.json",

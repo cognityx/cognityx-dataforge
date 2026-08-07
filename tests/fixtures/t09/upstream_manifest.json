@@ -1,7 +1,7 @@
 {
   "schema": "cognityx.dataforge.t09-upstream-fixtures/v1",
   "upstream_repository": "cognityx/cognityx-ingest",
-  "upstream_t08_merge_sha": "dc0e8757392ed490118893c8956bb4f6b82f5e13",
+  "upstream_t08_merge_sha": "2de38bb6826c64df96a918cef6895c7ada400966",
   "files": {
     "dataforge/composite_ku_contract.json": "3698a2b81c829606aee4a365dc4bcf11038f898615c3c2486e95048fd7d371b6",
     "dataforge/paragraph_qa_contract.json": "1c4b384d549cf4049008519170a06b4593d948a7fad687a90a347458d6c6a834",

@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 from cognityx_ingest import (
     CanonicalContentArtifact,
+    CanonicalRelation,
     EvidenceSetAddress,
     NodeSpan,
     ProvenanceAddressResolver,
@@ -57,6 +58,7 @@ from t09_support import (
     FrozenClaimGenerator,
     FrozenQuestionAnswerGenerator,
     foreign_canonical_with_same_node_ids,
+    frozen_canonical_artifact,
     frozen_evidence_bundle,
     frozen_paragraph_view,
     split_frozen_canonical_artifacts,
@@ -260,19 +262,22 @@ def test_shared_cross_resource_graph_supports_aggregate_loading(tmp_path: Path) 
     )
     artifact_store = runtime.for_role("artifact")
     canonicals = split_frozen_canonical_artifacts()
-    base_graph = SourceGraphBuilder().build(canonicals)
-    graph = replace(
-        base_graph,
-        graph_revision="sg-p22-shared-connected",
+    connected_canonical = replace(
+        frozen_canonical_artifact(),
         relations=(
-            next(
-                item
-                for item in frozen_evidence_bundle().source_graph.relations
-                if item.relation_id == "rel-policy-to-authority"
+            CanonicalRelation(
+                relation_id="rel-policy-to-authority",
+                source_id="pol-p4",
+                target_id="div-authority-2.1",
+                relation_type="references",
+                status="validated",
+                epistemic_state="deterministically-derived",
+                evidence_node_ids=("pol-p4",),
             ),
         ),
     )
-    graph.validate()
+    connected_canonical.validate()
+    graph = SourceGraphBuilder().build((connected_canonical,))
     catalog = build_strong_address_catalog(graph, canonicals)
     graph_uri = str(
         artifact_store.put_bytes(
