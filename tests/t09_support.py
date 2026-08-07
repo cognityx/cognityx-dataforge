@@ -9,6 +9,8 @@ are never derived by production code.
 
 from __future__ import annotations
 
+from dataclasses import replace
+import hashlib
 import json
 from pathlib import Path
 
@@ -22,6 +24,7 @@ from cognityx_ingest import (
     PresentationUnit,
     SegmentationView,
     SegmentationViewService,
+    SegmentationViewSet,
     SourceSelector,
 )
 
@@ -185,16 +188,21 @@ def frozen_evidence_bundle() -> ValidatedEvidenceBundle:
     )
 
 
-def frozen_paragraph_view():
+def frozen_paragraph_view(
+    canonical: CanonicalContentArtifact | None = None,
+) -> tuple[SegmentationViewService, SegmentationViewSet]:
     """Return a canonical-bound service and production paragraph view set.
 
     Paragraph tests call this adapter because the vendored view file carries the
     upstream compact fixture binding. The algorithm creates the normal service
-    from the complete canonical artifact, parses only the frozen paragraph view
-    with that exact production digest, and validates the resulting production
-    set. It copies references but no source text and performs no external call.
+    from the supplied or frozen complete canonical artifact, parses only the
+    frozen paragraph view with that exact production digest, and validates the
+    resulting production set. The optional artifact supports same-ID foreign-byte
+    boundary tests without modifying fixtures. It copies references but no source
+    text, performs no external call, and is deterministic for equal inputs.
     """
-    service = SegmentationViewService.from_canonical(frozen_canonical_artifact())
+    selected = canonical or frozen_canonical_artifact()
+    service = SegmentationViewService.from_canonical(selected)
     fixture = load_fixture("segmentation_views/views.json")
     paragraph = next(
         item for item in fixture["views"] if item["view_id"] == "view-paragraph-v1"
@@ -204,6 +212,82 @@ def frozen_paragraph_view():
         canonical_content_sha256=service.view_set.canonical_content_sha256,
     )
     return service, service.build_view_set((view,))
+
+
+def foreign_canonical_with_same_node_ids() -> CanonicalContentArtifact:
+    """Create different canonical bytes while retaining every frozen node ID.
+
+    Canonical-binding adversarial tests call this in-memory helper. It changes the
+    text and matching content digest of ``pol-p2`` but preserves graph-visible
+    identities, proving that a shared ID is not evidence ownership. The public
+    canonical validator checks the replacement; no fixture, source, parser,
+    Storage object, or production state is changed.
+    """
+    canonical = frozen_canonical_artifact()
+    nodes = []
+    for node in canonical.content_nodes:
+        if node.node_id != "pol-p2":
+            nodes.append(node)
+            continue
+        text = node.content.text + " Foreign canonical bytes."
+        nodes.append(
+            replace(
+                node,
+                content=CanonicalText(
+                    text=text,
+                    sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                ),
+            )
+        )
+    result = replace(
+        canonical,
+        document_id="fixture-v3-2-foreign",
+        content_nodes=tuple(nodes),
+    )
+    result.validate()
+    return result
+
+
+def split_frozen_canonical_artifacts() -> tuple[
+    CanonicalContentArtifact, CanonicalContentArtifact
+]:
+    """Split the frozen two-resource aggregate into valid per-document artifacts.
+
+    Multi-document producer-shape tests use this adapter to model current Ingest,
+    where each successful document owns independent T08 artifacts. It filters all
+    resource-owned canonical records in original order, assigns deterministic
+    document IDs, validates each result, and returns policy then authority. No
+    relation is inferred, fixture is rewritten, or parser/Storage/model work runs.
+    """
+    canonical = frozen_canonical_artifact()
+    results: list[CanonicalContentArtifact] = []
+    for document_id, resource in zip(
+        ("document-policy", "document-authority"),
+        canonical.resources,
+        strict=True,
+    ):
+        resource_id = resource.resource_id
+        result = replace(
+            canonical,
+            document_id=document_id,
+            resources=(resource,),
+            presentation_units=tuple(
+                item
+                for item in canonical.presentation_units
+                if item.resource_id == resource_id
+            ),
+            divisions=tuple(
+                item for item in canonical.divisions if item.resource_id == resource_id
+            ),
+            content_nodes=tuple(
+                item
+                for item in canonical.content_nodes
+                if item.resource_id == resource_id
+            ),
+        )
+        result.validate()
+        results.append(result)
+    return results[0], results[1]
 
 
 class FrozenQuestionAnswerGenerator(QuestionAnswerGenerator):

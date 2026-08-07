@@ -180,20 +180,22 @@ def test_paragraph_handoff_is_structurally_no_copy_and_canonical_bound() -> None
     evidence = frozen_evidence_bundle()
     service, view_set = frozen_paragraph_view()
     foreign = replace(view_set, canonical_content_sha256="0" * 64)
-    with pytest.raises(Exception):
+    generator = FrozenQuestionAnswerGenerator()
+    with pytest.raises(HandoffValidationError, match="view set"):
         DataForgeHandoffService().build_paragraph_qa(
             evidence=evidence,
             segmentation_service=service,
             view_set=foreign,
             view_id="view-paragraph-v1",
             segment_id="para-2",
-            generator=FrozenQuestionAnswerGenerator(),
+            generator=generator,
         )
+    assert generator.calls == []
 
 
-@pytest.mark.parametrize("status", ["forbidden", "unresolved", "obsolete"])
+@pytest.mark.parametrize("status", ["forbidden", "obsolete"])
 def test_non_exact_paragraph_support_blocks_generation(status: str) -> None:
-    """Reject forbidden, unresolved, and obsolete support before generator use."""
+    """Reject custom forbidden and obsolete policy before generator use."""
     evidence = frozen_evidence_bundle()
     service, view_set = frozen_paragraph_view()
     generator = FrozenQuestionAnswerGenerator()
@@ -209,13 +211,6 @@ def test_non_exact_paragraph_support_blocks_generation(status: str) -> None:
             evidence.provenance_addresses,
             obsolete_address_ids=frozenset({"addr-strong-pol-p2"}),
         )
-    else:
-        empty = replace(
-            evidence.provenance_addresses,
-            strong_addresses=(),
-            evidence_set_addresses=(),
-        )
-        resolver = ProvenanceAddressResolver(evidence.source_graph, empty)
     with pytest.raises(HandoffSupportError, match=status):
         DataForgeHandoffService().build_paragraph_qa(
             evidence=evidence,
@@ -225,6 +220,35 @@ def test_non_exact_paragraph_support_blocks_generation(status: str) -> None:
             segment_id="para-2",
             generator=generator,
             resolver=resolver,
+        )
+    assert generator.calls == []
+
+
+def test_unavailable_paragraph_support_blocks_generation() -> None:
+    """Reject a span with no evidence-owned strong address before generation."""
+    evidence = frozen_evidence_bundle()
+    catalog = replace(
+        evidence.provenance_addresses,
+        strong_addresses=tuple(
+            item
+            for item in evidence.provenance_addresses.strong_addresses
+            if item.address_id != "addr-strong-pol-p2"
+        ),
+        evidence_set_addresses=(),
+    )
+    without_support = ValidatedEvidenceBundle.create(
+        evidence.canonical_contents, evidence.source_graph, catalog
+    )
+    service, view_set = frozen_paragraph_view()
+    generator = FrozenQuestionAnswerGenerator()
+    with pytest.raises(HandoffSupportError, match="No exact strong address"):
+        DataForgeHandoffService().build_paragraph_qa(
+            evidence=without_support,
+            segmentation_service=service,
+            view_set=view_set,
+            view_id="view-paragraph-v1",
+            segment_id="para-2",
+            generator=generator,
         )
     assert generator.calls == []
 
@@ -273,9 +297,9 @@ def test_composite_ku_matches_frozen_claim_order_and_support() -> None:
     ]
 
 
-@pytest.mark.parametrize("status", ["forbidden", "unresolved", "obsolete"])
+@pytest.mark.parametrize("status", ["forbidden", "obsolete"])
 def test_non_exact_evidence_set_blocks_composite_generation(status: str) -> None:
-    """Reject incomplete composite support before any claim text is generated."""
+    """Reject custom forbidden and obsolete policy before claim generation."""
     evidence = frozen_evidence_bundle()
     generator = FrozenClaimGenerator()
     if status == "forbidden":
@@ -290,13 +314,6 @@ def test_non_exact_evidence_set_blocks_composite_generation(status: str) -> None
             evidence.provenance_addresses,
             obsolete_address_ids=frozenset({"addr-strong-pol-p2"}),
         )
-    else:
-        empty = replace(
-            evidence.provenance_addresses,
-            strong_addresses=(),
-            evidence_set_addresses=(),
-        )
-        resolver = ProvenanceAddressResolver(evidence.source_graph, empty)
     with pytest.raises(HandoffSupportError, match="Evidence set"):
         DataForgeHandoffService().build_composite_ku(
             evidence=evidence,
@@ -306,6 +323,26 @@ def test_non_exact_evidence_set_blocks_composite_generation(status: str) -> None
             task_schema="fixture",
             generator=generator,
             resolver=resolver,
+        )
+    assert generator.calls == []
+
+
+def test_unavailable_evidence_set_blocks_composite_generation() -> None:
+    """Reject absent evidence-owned set intent before claim generation."""
+    evidence = frozen_evidence_bundle()
+    catalog = replace(evidence.provenance_addresses, evidence_set_addresses=())
+    without_set = ValidatedEvidenceBundle.create(
+        evidence.canonical_contents, evidence.source_graph, catalog
+    )
+    generator = FrozenClaimGenerator()
+    with pytest.raises(HandoffSupportError, match="unavailable"):
+        DataForgeHandoffService().build_composite_ku(
+            evidence=without_set,
+            seed_division_id="div-policy-4.2",
+            evidence_set_address_id="missing-evidence-set",
+            knowledge_unit_id="ku-blocked",
+            task_schema="fixture",
+            generator=generator,
         )
     assert generator.calls == []
 
@@ -327,6 +364,9 @@ def test_valid_dataforge_owned_evidence_set_intent_is_in_memory_only() -> None:
             "addr-strong-auth-21",
         ),
     )
+    effective_catalog = replace(
+        catalog, evidence_set_addresses=(intent,)
+    )
     result = DataForgeHandoffService().build_composite_ku(
         evidence=without_set,
         seed_division_id="div-policy-4.2",
@@ -335,6 +375,9 @@ def test_valid_dataforge_owned_evidence_set_intent_is_in_memory_only() -> None:
         knowledge_unit_id="ku-travel-approval-001",
         task_schema="travel-expense-approval",
         generator=FrozenClaimGenerator(),
+        resolver=ProvenanceAddressResolver(
+            evidence.source_graph, effective_catalog
+        ),
     )
     assert result.evidence_set_address_id == "derived-evidence-set"
     assert catalog.evidence_set_addresses == ()

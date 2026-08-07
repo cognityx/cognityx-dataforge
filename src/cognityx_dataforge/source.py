@@ -29,6 +29,8 @@ from cognityx_dataforge.evidence import load_run_manifest
 _PROVENANCE_SCHEMA = "cognityx.ingest.provenance"
 _PROVENANCE_V1 = "cognityx.ingest.provenance/v1"
 _PROVENANCE_V2 = "cognityx.ingest.provenance/v2"
+_MAX_DOCUMENT_ID_LENGTH = 256
+_MAX_STORAGE_URI_LENGTH = 4096
 _V32_REF_FIELDS = frozenset(
     {
         "document_id",
@@ -104,6 +106,34 @@ class ResolvedV32Document:
     source_graph_uri: str
     provenance_addresses_uri: str
 
+    def __post_init__(self) -> None:
+        """Validate direct construction at the public source-reference boundary.
+
+        Programmatic callers and ``_parse_v3_2_ref`` converge here so neither can
+        create weaker records. The algorithm requires one bounded document ID and
+        four nonempty logical ``storage://`` URIs without sorting or dereferencing
+        them. It is deterministic, idempotent, side-effect free, and safe for
+        concurrent use of frozen values. Invalid input raises
+        ``V32SourceConflictError`` before any Storage read or downstream handoff.
+        """
+        _require_source_text(
+            self.document_id,
+            "document_id",
+            maximum=_MAX_DOCUMENT_ID_LENGTH,
+        )
+        for name in (
+            "provenance_uri",
+            "canonical_content_uri",
+            "source_graph_uri",
+            "provenance_addresses_uri",
+        ):
+            value = getattr(self, name)
+            _require_source_text(value, name, maximum=_MAX_STORAGE_URI_LENGTH)
+            if not value.startswith("storage://"):
+                raise V32SourceConflictError(
+                    f"v3.2 source {name} must be a logical Storage URI"
+                )
+
     def to_dict(self) -> dict[str, str]:
         """Return the closed producer-compatible reference shape.
 
@@ -133,6 +163,30 @@ class ResolvedV32SourceBundle:
 
     documents: tuple[ResolvedV32Document, ...]
 
+    def __post_init__(self) -> None:
+        """Require immutable records with unique IDs in producer-supplied order.
+
+        ``resolve_source`` and direct callers construct this aggregate. The check
+        accepts only a tuple of ``ResolvedV32Document`` values, scans once without
+        sorting, and rejects duplicate document IDs. It performs no I/O or
+        mutation, preserves deterministic producer order, and raises
+        ``V32SourceConflictError`` before loading any artifact. Frozen tuples are
+        safe for concurrent readers.
+        """
+        if not isinstance(self.documents, tuple):
+            raise V32SourceConflictError(
+                "v3.2 source bundle documents must be an immutable tuple"
+            )
+        if any(not isinstance(item, ResolvedV32Document) for item in self.documents):
+            raise V32SourceConflictError(
+                "v3.2 source bundle contains an unsupported document record"
+            )
+        identities = tuple(item.document_id for item in self.documents)
+        if len(identities) != len(set(identities)):
+            raise V32SourceConflictError(
+                "v3.2 source bundle repeats a document_id"
+            )
+
     def document(self, document_id: str) -> ResolvedV32Document:
         """Return one exact document reference or fail without fuzzy matching.
 
@@ -140,6 +194,11 @@ class ResolvedV32SourceBundle:
         preserves stored order, performs no I/O or mutation, and raises
         ``V32HandoffUnavailableError`` when the requested identity is absent.
         """
+        _require_source_text(
+            document_id,
+            "document_id",
+            maximum=_MAX_DOCUMENT_ID_LENGTH,
+        )
         for item in self.documents:
             if item.document_id == document_id:
                 return item
@@ -459,14 +518,11 @@ def _parse_v3_2_ref(value: object) -> ResolvedV32Document:
         raise V32SourceConflictError(
             "dataforge_source_refs entry has unsupported fields"
         )
-    fields = {name: str(value[name]) for name in _V32_REF_FIELDS}
-    if not fields["document_id"]:
-        raise V32SourceConflictError("dataforge source document_id is required")
-    for name in _V32_REF_FIELDS - {"document_id"}:
-        if not fields[name].startswith("storage://"):
-            raise V32SourceConflictError(
-                f"dataforge source {name} must be a logical Storage URI"
-            )
+    fields = {name: value[name] for name in _V32_REF_FIELDS}
+    if any(not isinstance(item, str) for item in fields.values()):
+        raise V32SourceConflictError(
+            "dataforge_source_refs values must be strings"
+        )
     return ResolvedV32Document(**fields)
 
 
@@ -502,3 +558,20 @@ def _v3_2_ref_from_provenance(
             "provenance_addresses_uri": artifact_uris["provenance_addresses"],
         }
     )
+
+
+def _require_source_text(value: object, label: str, *, maximum: int) -> str:
+    """Validate one bounded source-reference scalar without coercion or logging.
+
+    Public record construction calls this trust-boundary helper for document IDs
+    and logical URIs. It requires an actual nonempty string, strips nothing, and
+    returns the original value so identity remains byte-for-byte stable. The pure
+    check is deterministic and thread-safe, performs no Storage/network access,
+    and raises ``V32SourceConflictError`` without exposing source content or local
+    paths.
+    """
+    if not isinstance(value, str) or not value or len(value) > maximum:
+        raise V32SourceConflictError(
+            f"v3.2 source {label} must be a bounded nonempty string"
+        )
+    return value
