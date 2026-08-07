@@ -12,6 +12,7 @@ resolution-markers = [
 
 [manifest]
 overrides = [
+    { name = "cognityx-ingest", git = "https://github.com/cognityx/cognityx-ingest.git?rev=2de38bb6826c64df96a918cef6895c7ada400966" },
     { name = "cognityx-jobs", git = "https://github.com/cognityx/cognityx-jobs.git?rev=e4312fd461df97ffcefc54352b9b76f1dd6e6860" },
     { name = "cognityx-resource", git = "https://github.com/cognityx/cognityx-resource.git?rev=b23220b69fcb182e681cf13276c37474666c9bd2" },
     { name = "cognityx-storage", git = "https://github.com/cognityx/cognityx-storage.git?rev=0e73a286ff3c070f5e3fb30df7f00eab08b5c02c" },
@@ -531,7 +532,7 @@ inference = [
 [package.metadata]
 requires-dist = [
     { name = "cognityx-inference", marker = "extra == 'inference'", git = "https://github.com/cognityx/cognityx-inference.git?rev=14710786f5466d28c0e5690f4acf75e72f6d4e1d" },
-    { name = "cognityx-ingest", git = "https://github.com/cognityx/cognityx-ingest.git?rev=84de6039cfb087a14db40a7b84f29eeba4557f75" },
+    { name = "cognityx-ingest", git = "https://github.com/cognityx/cognityx-ingest.git?rev=2de38bb6826c64df96a918cef6895c7ada400966" },
     { name = "cognityx-jobs", git = "https://github.com/cognityx/cognityx-jobs.git?rev=e4312fd461df97ffcefc54352b9b76f1dd6e6860" },
     { name = "cognityx-resource", git = "https://github.com/cognityx/cognityx-resource.git?rev=b23220b69fcb182e681cf13276c37474666c9bd2" },
     { name = "cognityx-storage", git = "https://github.com/cognityx/cognityx-storage.git?rev=0e73a286ff3c070f5e3fb30df7f00eab08b5c02c" },
@@ -567,7 +568,7 @@ dependencies = [
 [[package]]
 name = "cognityx-ingest"
 version = "0.1.0"
-source = { git = "https://github.com/cognityx/cognityx-ingest.git?rev=84de6039cfb087a14db40a7b84f29eeba4557f75#84de6039cfb087a14db40a7b84f29eeba4557f75" }
+source = { git = "https://github.com/cognityx/cognityx-ingest.git?rev=2de38bb6826c64df96a918cef6895c7ada400966#2de38bb6826c64df96a918cef6895c7ada400966" }
 dependencies = [
     { name = "cognityx-jobs" },
     { name = "cognityx-resource" },

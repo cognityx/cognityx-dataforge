@@ -11,5 +11,6 @@ strict: true
 nav:
   - Home: index.md
   - Introduction: introduction.md
+  - Provenance handoff: provenance-handoff.md
   - Research variants: variants.md
   - Reference: reference.md

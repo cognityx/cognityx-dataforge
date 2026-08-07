@@ -58,5 +58,7 @@ executable recipe, and no research hypothesis in this documentation should be
 read as a proven result or a novelty claim.
 
 Read the [introduction](introduction.md) for terminology, the
+[provenance handoff guide](provenance-handoff.md) for exact v3.2 paragraph and
+composite support, the
 [variant guide](variants.md) for the research progression, and the
 [reference](reference.md) for commands and artifacts.
