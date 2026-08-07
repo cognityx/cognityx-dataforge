@@ -35,7 +35,7 @@ addopts = "-q"
 cognityx-resource = { git = "https://github.com/cognityx/cognityx-resource.git", rev = "b23220b69fcb182e681cf13276c37474666c9bd2" }
 cognityx-storage = { git = "https://github.com/cognityx/cognityx-storage.git", rev = "0e73a286ff3c070f5e3fb30df7f00eab08b5c02c" }
 cognityx-jobs = { git = "https://github.com/cognityx/cognityx-jobs.git", rev = "e4312fd461df97ffcefc54352b9b76f1dd6e6860" }
-cognityx-ingest = { git = "https://github.com/cognityx/cognityx-ingest.git", rev = "84de6039cfb087a14db40a7b84f29eeba4557f75" }
+cognityx-ingest = { git = "https://github.com/cognityx/cognityx-ingest.git", rev = "dc0e8757392ed490118893c8956bb4f6b82f5e13" }
 cognityx-inference = { git = "https://github.com/cognityx/cognityx-inference.git", rev = "14710786f5466d28c0e5690f4acf75e72f6d4e1d" }
 
 [tool.uv]
@@ -43,4 +43,5 @@ override-dependencies = [
   "cognityx-resource @ git+https://github.com/cognityx/cognityx-resource.git@b23220b69fcb182e681cf13276c37474666c9bd2",
   "cognityx-storage @ git+https://github.com/cognityx/cognityx-storage.git@0e73a286ff3c070f5e3fb30df7f00eab08b5c02c",
   "cognityx-jobs @ git+https://github.com/cognityx/cognityx-jobs.git@e4312fd461df97ffcefc54352b9b76f1dd6e6860",
+  "cognityx-ingest @ git+https://github.com/cognityx/cognityx-ingest.git@dc0e8757392ed490118893c8956bb4f6b82f5e13",
 ]

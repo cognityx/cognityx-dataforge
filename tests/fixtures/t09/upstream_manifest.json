@@ -1,0 +1,13 @@
+{
+  "schema": "cognityx.dataforge.t09-upstream-fixtures/v1",
+  "upstream_repository": "cognityx/cognityx-ingest",
+  "upstream_t08_merge_sha": "dc0e8757392ed490118893c8956bb4f6b82f5e13",
+  "files": {
+    "dataforge/composite_ku_contract.json": "3698a2b81c829606aee4a365dc4bcf11038f898615c3c2486e95048fd7d371b6",
+    "dataforge/paragraph_qa_contract.json": "1c4b384d549cf4049008519170a06b4593d948a7fad687a90a347458d6c6a834",
+    "expected/canonical_content.json": "9f578890f3efb0e6fbed660b06abb71d17274ac749a6e8750741ace71a42801d",
+    "expected/provenance_addresses.json": "dca095964c58f52c02f327d4e450d94f5f1e338d3dbbc14a6d38f722230ab051",
+    "expected/source_graph.json": "0a863a78e28563b45b702d75c9d07bc8a4f40be37d3eb90a647522bad5795d06",
+    "segmentation_views/views.json": "0740e4119ef87edb28e76e728db5cab655075733bb4b40a7e7d41682364c4040"
+  }
+}
