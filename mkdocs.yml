@@ -12,5 +12,7 @@ nav:
   - Home: index.md
   - Introduction: introduction.md
   - Provenance handoff: provenance-handoff.md
+  - Qualification and research: qualification-research.md
+  - Failure traceability: failure-traceability.md
   - Research variants: variants.md
   - Reference: reference.md

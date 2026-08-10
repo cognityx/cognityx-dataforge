@@ -32,6 +32,37 @@ identifier, token information and failures.
 **Risks:** Paragraphs can fragment context, repeat knowledge and produce shallow
 or unfocused questions.
 
+## Qualified Paragraph QA
+
+**Concept and hypothesis:** Generate exactly the same paragraph candidates as
+the raw control, then remove questions or references that the source cannot
+support. This tests qualification itself, without changing the source,
+generator, base model, trainer, training-token budget or evaluator.
+
+**Difference and method:** The generation prompt and candidate identity are
+shared with Paragraph QA. Qualification freezes four later artifacts: what the
+question demands, what the source can answer, how well the reference fills the
+demand, and a deterministic accept/reject/review decision.
+
+```bash
+cognityx-dataforge build paragraph-qa-qualified \
+  --source <storage-run-manifest-uri> \
+  --experiment-id <experiment-id> \
+  --config dataforge.toml
+```
+
+Malformed model output is operational uncertainty, not evidence that the
+reference is wrong. After the configured retry limit, the record goes to
+`needs-review.jsonl`. DataForge never silently repairs or accepts a rewritten
+reference.
+
+**Expected strength:** Prevents source-supported but question-misaligned
+references, including a question asking which approval authority is required
+when the source only says that approval is required.
+
+**Risks:** Qualification models can still extract the wrong slots. Raw attempts,
+deterministic checks and frozen fixtures make those errors inspectable.
+
 ## Knowledge-Unit QA
 
 **Concept and hypothesis:** First form a self-contained knowledge unit, then

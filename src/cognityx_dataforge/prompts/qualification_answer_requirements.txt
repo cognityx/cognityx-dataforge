@@ -1,0 +1,3 @@
+Analyze only the question. Describe what a complete answer must contain without
+guessing an answer. Return required_slots (a list) and answer_structure. You must
+not use source evidence, a gold answer, or a generated candidate answer.

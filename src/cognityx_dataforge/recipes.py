@@ -4,7 +4,7 @@ import warnings
 
 
 RECIPE_ALIASES = {"v0": "paragraph-qa", "v1": "knowledge-unit-qa"}
-SUPPORTED_RECIPES = frozenset({"paragraph-qa", "knowledge-unit-qa", "knowledge-unit-probed-qa"})
+SUPPORTED_RECIPES = frozenset({"paragraph-qa", "paragraph-qa-qualified", "knowledge-unit-qa", "knowledge-unit-probed-qa"})
 
 
 def normalize_recipe(recipe: str | None = None, *, variant: str | None = None) -> str:

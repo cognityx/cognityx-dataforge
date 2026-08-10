@@ -35,6 +35,23 @@ from cognityx_dataforge.source import (
     V32SourceConflictError,
     resolve_source,
 )
+from cognityx_dataforge.qualification import (
+    ANSWER_REQUIREMENTS_SCHEMA,
+    QUALIFICATION_DECISION_SCHEMA,
+    REFERENCE_QUALIFICATION_SCHEMA,
+    SOURCE_ANSWERABILITY_SCHEMA,
+    QualificationPipeline,
+    qualification_decision,
+)
+from cognityx_dataforge.research import (
+    EVALUATION_SET_SCHEMA,
+    RESEARCH_PACKAGE_SCHEMA,
+    create_exact_recall_set,
+    create_research_package,
+    freeze_evaluation_set,
+    import_evaluation_set,
+    load_research_package,
+)
 
 __all__ = [
     "COMPOSITE_KU_HANDOFF_SCHEMA",
@@ -57,7 +74,20 @@ __all__ = [
     "V32HandoffUnavailableError",
     "V32SourceConflictError",
     "ValidatedEvidenceBundle",
+    "ANSWER_REQUIREMENTS_SCHEMA",
+    "EVALUATION_SET_SCHEMA",
+    "QUALIFICATION_DECISION_SCHEMA",
+    "REFERENCE_QUALIFICATION_SCHEMA",
+    "RESEARCH_PACKAGE_SCHEMA",
+    "SOURCE_ANSWERABILITY_SCHEMA",
+    "QualificationPipeline",
     "build_dataset",
     "build_gold_relation_closure",
     "resolve_source",
+    "create_exact_recall_set",
+    "create_research_package",
+    "freeze_evaluation_set",
+    "import_evaluation_set",
+    "load_research_package",
+    "qualification_decision",
 ]

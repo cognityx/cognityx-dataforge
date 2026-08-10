@@ -1,0 +1,4 @@
+Use the frozen question requirements and source evidence to decide whether the
+source can answer every requested slot at the requested specificity. Return
+answerable_at_requested_specificity, slot_values, missing_slots, and notes. Do
+not evaluate or infer from a generated answer; no generated answer is present.
