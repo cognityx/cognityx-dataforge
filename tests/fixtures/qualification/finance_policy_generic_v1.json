@@ -1,0 +1,87 @@
+{
+  "fixture_id": "finance-policy-generic-v1",
+  "question": "For an expense above 2,750 euros, how many approvals are required and which roles must approve it?",
+  "source": "An expense above 2,750 euros requires two independent approvals: the cost-centre owner and the regional finance controller.",
+  "reference": "It requires two independent approvals from the cost-centre owner and the regional finance controller.",
+  "answer_requirements": {
+    "question_validity": "valid",
+    "required_slots": [
+      "dual_control_approval_count",
+      "financial_approver_set"
+    ],
+    "answer_structure": "numeric_and_complete_set",
+    "allowed_inference_policy": "source_explicit_only",
+    "requirements": [
+      {
+        "requirement_id": "dual_control_approval_count",
+        "semantic_role": "independent approval count",
+        "semantic_role_terms": ["approval", "approvals"],
+        "value_type": "number",
+        "unit": "approvals",
+        "cardinality": "exact"
+      },
+      {
+        "requirement_id": "financial_approver_set",
+        "semantic_role": "financial approver roles",
+        "value_type": "set",
+        "cardinality": "complete_set"
+      }
+    ]
+  },
+  "source_answerability": {
+    "answerable_at_requested_specificity": true,
+    "allowed_inference_policy": "source_explicit_only",
+    "missing_slots": [],
+    "requirement_bindings": [
+      {
+        "requirement_id": "dual_control_approval_count",
+        "supported": true,
+        "expected_value": 2,
+        "value_type": "number",
+        "unit": "approvals",
+        "cardinality": "exact"
+      },
+      {
+        "requirement_id": "financial_approver_set",
+        "supported": true,
+        "value_type": "set",
+        "expected_members": [
+          "cost centre owner",
+          "regional finance controller"
+        ],
+        "cardinality": "complete_set"
+      }
+    ],
+    "supported_claims": [
+      "two independent approvals are required",
+      "the cost-centre owner must approve",
+      "the regional finance controller must approve"
+    ],
+    "evidence_anchors": ["finance-policy:section-7.4"]
+  },
+  "reference_qualification": {
+    "answers_question": true,
+    "required_slot_coverage": 1.0,
+    "reference_correctness": "correct",
+    "reference_completeness": "complete",
+    "source_faithfulness": "passed",
+    "supported_claims": [
+      "two independent approvals are required",
+      "the cost-centre owner must approve",
+      "the regional finance controller must approve"
+    ],
+    "unsupported_claims": [],
+    "contradicted_claims": [],
+    "requirement_results": [
+      {
+        "requirement_id": "dual_control_approval_count",
+        "relation_matches": true,
+        "qualifiers_present": true
+      },
+      {
+        "requirement_id": "financial_approver_set",
+        "qualifiers_present": true
+      }
+    ]
+  }
+}

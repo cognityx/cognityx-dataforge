@@ -1,0 +1,18 @@
+{
+  "status": "historical_identity_only",
+  "experiment_id": "lunavane-basic-paragraph-qa",
+  "dataset_id": "ab9aca5c6c90d6ea1ffd7e680b626f2e",
+  "dataset_version": "9c1d7d0608e0d19262b78ac6872283b3",
+  "recipe": "paragraph-qa",
+  "dataset_manifest_uri": "storage://local-main/datasets/dataforge/experiments/lunavane-basic-paragraph-qa/variants/f39b3fd1398f7262b3e1cf9e38ad9702/runs/run-78629130983b4e55b353a5b78da7fcc6/datasets/ab9aca5c6c90d6ea1ffd7e680b626f2e/9c1d7d0608e0d19262b78ac6872283b3/manifest.json",
+  "dataset_manifest_checksum": "c74a4d64dc50516e113960a405054a10dcb58a2b4591f64630349dce21c938b1",
+  "records_uri": "storage://local-main/datasets/dataforge/experiments/lunavane-basic-paragraph-qa/variants/f39b3fd1398f7262b3e1cf9e38ad9702/runs/run-78629130983b4e55b353a5b78da7fcc6/datasets/ab9aca5c6c90d6ea1ffd7e680b626f2e/9c1d7d0608e0d19262b78ac6872283b3/records.jsonl",
+  "records_checksum": "44d85707ba05ab0ae265502726eb906aac55dc802e53f1a3c8480f7ef244c6ac",
+  "source_manifest_uri": "storage://local-main/artifacts/ingest/runs/ae236603-50e0-48a9-bbd4-2f422c6c3b66/manifest.json",
+  "source_manifest_checksum": "5a83c8395f2376b04517791c5f76c234a7f7c314b26bce7ea35a463688bbf996",
+  "split_summary": {
+    "train": 29,
+    "evaluation": 0
+  },
+  "notes": "These Storage URIs refer to the original local experiment and are not expected to resolve in Codex CI. Use as reproducibility evidence only; use repository fixtures for automated tests."
+}

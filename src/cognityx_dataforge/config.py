@@ -27,6 +27,9 @@ class DataForgeConfig:
     probe_generator: GeneratorModelConfig | None = None
     student: GeneratorModelConfig | None = None
     probe_judge: GeneratorModelConfig | None = None
+    answer_requirements: GeneratorModelConfig | None = None
+    source_answerability: GeneratorModelConfig | None = None
+    reference_qualification: GeneratorModelConfig | None = None
     prompt_versions: dict[str, str] = None  # type: ignore[assignment]
     context_limit_tokens: int | None = None
     base_url: str | None = None
@@ -41,11 +44,14 @@ class DataForgeConfig:
     probes_per_unit: int = 2
     include_classes: tuple[str, ...] = ("partial", "unknown")
     known_sample_rate: float = 0.0
+    qualification_max_attempts: int = 2
     split_seed: str = "dataforge-v1"
 
     def __post_init__(self) -> None:
         if self.prompt_versions is None:
-            object.__setattr__(self, "prompt_versions", {"generation": "1.0", "knowledge_unit": "1.0", "validation": "1.0", "probe_generation": "2.0", "student_probe": "2.0", "probe_judgment": "2.0", "probed_qa_generation": "2.0", "probed_qa_validation": "2.0"})
+            object.__setattr__(self, "prompt_versions", {"generation": "1.0", "knowledge_unit": "1.0", "validation": "1.0", "probe_generation": "2.0", "student_probe": "2.0", "probe_judgment": "2.0", "probed_qa_generation": "2.0", "probed_qa_validation": "2.0", "answer_requirements": "1.0", "source_answerability": "1.0", "reference_qualification": "1.0"})
+        if self.qualification_max_attempts < 1:
+            raise ValueError("qualification.max_attempts must be at least 1")
 
     @property
     def prompt_version(self) -> str:
@@ -76,6 +82,9 @@ class DataForgeConfig:
         probe_generator = role_config(models.get("probe_generator") or models.get("qa_generator") or generator)
         student = role_config(models.get("student") or generator)
         probe_judge = role_config(models.get("probe_judge") or models.get("validator") or generator)
+        answer_requirements = role_config(models.get("answer_requirements") or models.get("validator") or generator)
+        source_answerability = role_config(models.get("source_answerability") or models.get("validator") or generator)
+        reference_qualification = role_config(models.get("reference_qualification") or models.get("validator") or generator)
         probing = payload.get("probing", {})
         prompt_versions = payload.get("prompt_versions")
         if not prompt_versions:
@@ -86,6 +95,9 @@ class DataForgeConfig:
         prompt_versions.setdefault("probe_judgment", "2.0")
         prompt_versions.setdefault("probed_qa_generation", "2.0")
         prompt_versions.setdefault("probed_qa_validation", "2.0")
+        prompt_versions.setdefault("answer_requirements", "1.0")
+        prompt_versions.setdefault("source_answerability", "1.0")
+        prompt_versions.setdefault("reference_qualification", "1.0")
         return cls(
             generator=GeneratorModelConfig(
                 model=str(generator["model"]),
@@ -101,6 +113,9 @@ class DataForgeConfig:
             probe_generator=probe_generator,
             student=student,
             probe_judge=probe_judge,
+            answer_requirements=answer_requirements,
+            source_answerability=source_answerability,
+            reference_qualification=reference_qualification,
             prompt_versions={str(key): str(value) for key, value in prompt_versions.items()},
             context_limit_tokens=(int(payload.get("context_limit_tokens")) if payload.get("context_limit_tokens") is not None else None),
             base_url=(str(payload["inference"]["base_url"]) if payload.get("inference", {}).get("base_url") is not None else None),
@@ -115,5 +130,6 @@ class DataForgeConfig:
             probes_per_unit=int(probing.get("probes_per_unit", 2)),
             include_classes=tuple(str(item) for item in probing.get("include_classes", ("partial", "unknown"))),
             known_sample_rate=float(probing.get("known_sample_rate", 0.0)),
+            qualification_max_attempts=int(payload.get("qualification", {}).get("max_attempts", 2)),
             split_seed=str(payload.get("splitting", {}).get("seed", "dataforge-v1")),
         )

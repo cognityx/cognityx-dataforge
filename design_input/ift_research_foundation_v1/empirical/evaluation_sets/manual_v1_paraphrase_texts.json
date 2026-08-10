@@ -1,0 +1,19 @@
+{
+  "paraphrase_pool_id": "manual-v1",
+  "status": "historical_pilot_only",
+  "generator": "manual",
+  "training_eligible": false,
+  "notes": "One manually curated paraphrase per first-10 training fact. Preserve as history/integration input only; not publication-grade paraphrase protocol.",
+  "paraphrases": [
+    "What title does this document have?",
+    "How is this document classified?",
+    "Which phrase is specified as the document's integrity phrase?",
+    "Which deliberately absent document is cited by the People Policy?",
+    "Under the PR-01 Clear Moon Principle, what is a manager required to state when making a decision?",
+    "Which groups or individuals fall within the scope of this policy?",
+    "How does the document define a 'Brass day'?",
+    "Under the CF-23/31 Copper Finch Threshold, at what sustained wind speed or gust speed must open-deck work stop?",
+    "Before exceeding 11.5 overtime hours across eight rolling days, what approval is required?",
+    "For a message longer than 700 words, what does the BL-700 Blue Lantern Rule require in the subject?"
+  ]
+}

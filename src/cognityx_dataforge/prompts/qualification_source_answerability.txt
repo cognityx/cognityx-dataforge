@@ -1,0 +1,8 @@
+Use the frozen question requirements and source evidence to decide whether the
+source can answer every requested slot at the requested specificity. Return
+answerable_at_requested_specificity, missing_slots, requirement_bindings,
+supported_claims, evidence_anchors, allowed_inference_policy, and notes. Each
+binding must identify its requirement_id and freeze the supported value, type,
+unit, relation, cardinality, qualifiers, expected members, or canonical value
+needed by the next stage. Do not copy raw source text into the result. Do not
+evaluate or infer from a generated answer; no generated answer is present.

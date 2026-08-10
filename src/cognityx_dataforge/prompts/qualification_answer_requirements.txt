@@ -1,0 +1,7 @@
+Analyze only the question. Describe what a complete answer must contain without
+guessing an answer. Return question_validity, required_slots, answer_structure,
+allowed_inference_policy, and requirements. Each requirement must have a stable
+requirement_id, semantic_role, value_type, and any applicable cardinality,
+relation, unit, semantic_role_terms, required_qualifiers, or exact/canonical
+matching policy. You must not use source evidence, a gold answer, or a generated
+candidate answer.

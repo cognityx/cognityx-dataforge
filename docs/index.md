@@ -45,10 +45,12 @@ separate model runtime or choose an unapproved model on its own.
 
 ## Research purpose
 
-DataForge provides three implemented recipes for comparing data-preparation
+DataForge provides four implemented recipes for comparing data-preparation
 methods:
 
 - **Paragraph QA** creates examples directly from paragraphs.
+- **Qualified Paragraph QA** checks the same generated candidates through a
+  candidate-blind, source-grounded qualification pipeline.
 - **Knowledge-Unit QA** first identifies a self-contained piece of knowledge.
 - **Probed Knowledge-Unit QA** first checks what the student model knows.
 
@@ -61,4 +63,6 @@ Read the [introduction](introduction.md) for terminology, the
 [provenance handoff guide](provenance-handoff.md) for exact v3.2 paragraph and
 composite support, the
 [variant guide](variants.md) for the research progression, and the
+[qualification and research guide](qualification-research.md) for frozen
+evaluation packages and controlled raw-versus-qualified comparisons, the
 [reference](reference.md) for commands and artifacts.

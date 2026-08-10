@@ -62,7 +62,13 @@ dataforge/experiments/<experiment-id>/
       run-events.jsonl
       datasets/<dataset-id>/<dataset-version>/
         candidates.jsonl
+        answer-requirements.jsonl
+        source-answerability.jsonl
+        reference-qualification.jsonl
+        qualification-decisions.jsonl
+        accepted.jsonl
         rejections.jsonl
+        needs-review.jsonl
         records.jsonl
         model-calls*.jsonl
         checkpoints/
@@ -128,3 +134,42 @@ cognityx-dataforge dataset export \
 
 Export resolves `records_uri` through Storage and verifies its checksum before
 writing the requested local output file.
+
+## Freeze evaluation sets and a research package
+
+An exact-recall set copies only accepted training records, gives every copy a
+new evaluation record ID and retains `source_record_id`:
+
+```bash
+cognityx-dataforge evaluation-set exact-recall \
+  <dataset-manifest-uri> \
+  --name policy-exact-recall
+```
+
+Import test-only paraphrases or held-out knowledge units from JSONL:
+
+```bash
+cognityx-dataforge evaluation-set import \
+  --input paraphrases.jsonl \
+  --name policy-paraphrases \
+  --research-role paraphrase_evaluation
+```
+
+Imported records must contain stable IDs, a fact or knowledge-unit group, and
+resolvable provenance. Evaluation records always use `split=evaluation`, carry
+an explicit `research_role`, and set `training_eligible=false`. Duplicate IDs
+or a trainable evaluation record stop publication.
+
+Link the dataset and frozen sets:
+
+```bash
+cognityx-dataforge research-package create \
+  --name policy-qualification-comparison \
+  --dataset-manifest <dataset-manifest-uri> \
+  --evaluation-manifest <exact-recall-manifest-uri> \
+  --evaluation-manifest <paraphrase-manifest-uri>
+```
+
+The package uses `cognityx.dataforge.research-package/v1` and requires an
+`exact_recall` set. Dataset and evaluation checksums are verified before its
+manifest is written.

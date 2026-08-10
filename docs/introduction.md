@@ -25,6 +25,18 @@ defined context.
 A **reference answer** expresses that ground truth as an answer to a particular
 question or instruction.
 
+**Qualification** checks a generated question and reference before either can
+be used for training. It first asks what information the question demands,
+then checks whether the source contains that information, and only then checks
+whether the reference supplies it. A generated model answer being evaluated is
+never shown during these steps; this separation is called candidate-blind
+qualification.
+
+An **evaluation set** is a frozen group of test-only records. Its checksum is a
+digital fingerprint: changing even one byte changes the fingerprint. A
+**research package** links one training dataset to its frozen evaluation sets
+so Training cannot accidentally compare unrelated inputs.
+
 A **knowledge unit** is a self-contained fact, rule, concept, procedure or
 relationship derived from evidence. It says what should be taught or tested; it
 is not yet a question or answer.

@@ -13,6 +13,12 @@ from cognityx_storage import StorageConfig, StorageRuntime
 from cognityx_dataforge.build import _store_for_uri, build_dataset
 from cognityx_dataforge.execution import default_jobs_database, load_job_repository
 from cognityx_dataforge.recipes import normalize_recipe
+from cognityx_dataforge.research import (
+    create_exact_recall_set,
+    create_research_package,
+    import_evaluation_set,
+    load_research_package,
+)
 
 
 def _runtime(args: argparse.Namespace) -> StorageRuntime:
@@ -79,6 +85,35 @@ def main() -> None:
         if name == "watch":
             command.add_argument("--interval", type=float, default=0.5)
 
+    evaluation_set = sub.add_parser("evaluation-set")
+    evaluation_sub = evaluation_set.add_subparsers(dest="evaluation_command", required=True)
+    exact_recall = evaluation_sub.add_parser("exact-recall")
+    exact_recall.add_argument("dataset_manifest_uri")
+    exact_recall.add_argument("--name")
+    imported = evaluation_sub.add_parser("import")
+    imported.add_argument("--input", required=True)
+    imported.add_argument("--name", required=True)
+    imported.add_argument(
+        "--research-role",
+        required=True,
+        choices=("paraphrase_evaluation", "heldout_knowledge_unit"),
+    )
+    for command in (exact_recall, imported):
+        command.add_argument("--storage-root")
+        command.add_argument("--storage-config")
+
+    research_package = sub.add_parser("research-package")
+    research_sub = research_package.add_subparsers(dest="research_command", required=True)
+    package_create = research_sub.add_parser("create")
+    package_create.add_argument("--name", required=True)
+    package_create.add_argument("--dataset-manifest", required=True)
+    package_create.add_argument("--evaluation-manifest", action="append", required=True)
+    package_show = research_sub.add_parser("show")
+    package_show.add_argument("research_package_manifest_uri")
+    for command in (package_create, package_show):
+        command.add_argument("--storage-root")
+        command.add_argument("--storage-config")
+
     args = parser.parse_args()
     if args.command == "job":
         jobs = _jobs(args)
@@ -98,6 +133,34 @@ def main() -> None:
             time.sleep(args.interval)
 
     runtime = _runtime(args)
+    if args.command == "evaluation-set":
+        if args.evaluation_command == "exact-recall":
+            result = create_exact_recall_set(
+                runtime,
+                args.dataset_manifest_uri,
+                evaluation_set_name=args.name,
+            )
+        else:
+            result = import_evaluation_set(
+                runtime,
+                args.input,
+                evaluation_set_name=args.name,
+                research_role=args.research_role,
+            )
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return
+    if args.command == "research-package":
+        if args.research_command == "create":
+            result = create_research_package(
+                runtime,
+                package_name=args.name,
+                dataset_manifest_uri=args.dataset_manifest,
+                evaluation_manifest_uris=args.evaluation_manifest,
+            )
+        else:
+            result = load_research_package(runtime, args.research_package_manifest_uri)
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return
     if args.command == "build":
         source = args.source or args.input_manifest
         if args.input_manifest:

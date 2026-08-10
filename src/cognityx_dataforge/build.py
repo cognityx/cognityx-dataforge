@@ -29,6 +29,7 @@ from cognityx_dataforge.knowledge import KnowledgeUnit, parse_knowledge_units
 from cognityx_dataforge.models import DatasetRecord
 from cognityx_dataforge.paragraphs import paragraph_spans
 from cognityx_dataforge.recipes import normalize_recipe
+from cognityx_dataforge.qualification import QualificationPipeline
 from cognityx_dataforge.execution import BuildIdentity, load_job_repository
 from cognityx_dataforge.source import resolve_source, resolve_storage_uri
 
@@ -145,6 +146,16 @@ def _check_cancel(jobs: JobRepository, job_id: str, stage: str) -> None:
 def _role_config(config: DataForgeConfig, name: str) -> GeneratorConfig:
     value = getattr(config, name) or config.generator
     return GeneratorConfig(**asdict(value))
+
+
+def _qualified_models(config: DataForgeConfig) -> dict[str, dict[str, Any]]:
+    return {
+        "generator": asdict(config.generator),
+        **{
+            name: asdict(getattr(config, name) or config.validator or config.generator)
+            for name in ("answer_requirements", "source_answerability", "reference_qualification")
+        },
+    }
 
 
 def _probed_identity(
@@ -494,6 +505,377 @@ def _build_knowledge_unit_staged(*, manifest: dict[str, Any], dataset_name: str,
     return {**_identity_fields(identity), "recipe": "knowledge-unit-qa", "record_count": len(records), "dataset_manifest_uri": dataset_store.uri(f"{dataset_root}/manifest.json")}
 
 
+def _evidence_provenance(item: Any, *, char_start: int, char_end: int) -> dict[str, Any]:
+    return {
+        "source_asset_ids": [item.source_asset_id] if item.source_asset_id else [],
+        "document_ids": [item.document_id],
+        "evidence_ids": [item.evidence_id],
+        "source_anchor_ids": _source_anchor_ids([item]),
+        "char_start": char_start,
+        "char_end": char_end,
+        "page_coordinates": {
+            "physical_page_index": getattr(item, "physical_page_index", None),
+            "page_number": getattr(item, "page_number", None),
+            "printed_page_label": getattr(item, "printed_page_label", None),
+            "pdf_page_label": getattr(item, "pdf_page_label", None),
+        },
+    }
+
+
+def _paragraph_candidate(item: Any, *, dataset_name: str, char_start: int, char_end: int, text: str) -> dict[str, Any]:
+    return {
+        "candidate_id": deterministic_id(dataset_name, "paragraph-qa-candidate", item.evidence_id, str(char_start), str(char_end)),
+        "evidence_id": item.evidence_id,
+        "char_start": char_start,
+        "char_end": char_end,
+        "text": text,
+        "source_text": text,
+        "provenance": _evidence_provenance(item, char_start=char_start, char_end=char_end),
+    }
+
+
+def _build_paragraph_qualified(
+    *,
+    manifest: dict[str, Any],
+    dataset_name: str,
+    config: DataForgeConfig,
+    runtime: StorageRuntime,
+    jobs: JobRepository,
+    inference_client: Any,
+    dataset_store: Any,
+    dataset_root: str,
+    identity: BuildIdentity,
+    input_manifest_uri: str,
+) -> dict[str, Any]:
+    recipe = "paragraph-qa-qualified"
+    keys = {
+        name: f"{dataset_root}/{name}.jsonl"
+        for name in (
+            "candidates",
+            "answer-requirements",
+            "source-answerability",
+            "reference-qualification",
+            "qualification-decisions",
+            "accepted",
+            "rejected",
+            "needs-review",
+            "records",
+            "model-calls-generation",
+            "model-calls",
+        )
+    }
+    summary_key = f"{dataset_root}/qualification-summary.json"
+    checkpoint_identity = {
+        "dataset_name": dataset_name,
+        "experiment_id": identity.experiment_id,
+        "variant_id": identity.variant_id,
+        "dataset_id": identity.dataset_id,
+        "dataset_version": identity.dataset_version,
+        "recipe": recipe,
+        "source_manifest_checksum": checksum(manifest),
+        "configuration_checksum": checksum(asdict(config)),
+        "models": _qualified_models(config),
+        "prompt_versions": dict(config.prompt_versions),
+    }
+
+    evidence_groups = []
+    for ref in manifest["evidence_refs"]:
+        store, key = resolve_storage_uri(runtime, ref)
+        with store.open(key) as handle:
+            evidence_groups.append(load_evidence_jsonl(handle))
+    evidence = combine_evidence(evidence_groups)
+    validate_context(manifest, evidence)
+    evidence_availability(evidence)
+
+    pool = inference_client if isinstance(inference_client, InferenceClientPool) else InferenceClientPool(config=config, injected_client=inference_client)
+    pool.set_lineage(
+        dataset_id=identity.dataset_id,
+        dataset_version=identity.dataset_version,
+        run_id=identity.run_id,
+        job_id=identity.job_id,
+        recipe=recipe,
+        data_classification=config.data_classification,
+    )
+    calls = _read_jsonl(dataset_store, keys["model-calls"])
+    if not calls:
+        calls = _read_jsonl(dataset_store, keys["model-calls-generation"])
+    rejections: list[dict[str, Any]] = []
+    candidates = _read_jsonl(dataset_store, keys["candidates"])
+
+    def checkpoint(stage: str, artifact_keys: list[str], rows: int) -> None:
+        artifacts: dict[str, str] = {}
+        for artifact_key in artifact_keys:
+            with dataset_store.open(artifact_key) as handle:
+                artifacts[artifact_key] = checksum(handle.read().decode("utf-8"))
+        _write_checkpoint(dataset_store, dataset_root, stage, checkpoint_identity, artifacts, rows)
+
+    _check_cancel(jobs, identity.job_id, "candidate_generation")
+    jobs.append_event(identity.job_id, "stage_started", {"stage": "candidate_generation"})
+    if not _completed_checkpoint(dataset_store, dataset_root, "candidate_generation", checkpoint_identity, {}):
+        candidates = []
+        generator = GeneratorAdapter(pool, GeneratorConfig(**asdict(config.generator)))
+        prompt = Path(__file__).with_name("prompts").joinpath("v0_instruction_answer.txt").read_text(encoding="utf-8")
+        for item in evidence:
+            for start, end, text in paragraph_spans(item.text):
+                _check_cancel(jobs, identity.job_id, "candidate_generation")
+                candidate = _paragraph_candidate(
+                    item,
+                    dataset_name=dataset_name,
+                    char_start=start,
+                    char_end=end,
+                    text=text,
+                )
+                candidate_id = candidate["candidate_id"]
+                try:
+                    generated = generator.generate_budgeted(
+                        prompt + "\n\n" + text,
+                        context_limit=config.context_limit_tokens,
+                        role="generator",
+                        prompt_version=config.prompt_versions["generation"],
+                        evidence_ids=[item.evidence_id],
+                        calls=calls,
+                    )
+                    candidate.update({
+                        "status": "generated",
+                        "question": generated["instruction"],
+                        "reference": generated["answer"],
+                        "request_metadata": dict(calls[-1]),
+                    })
+                except Exception as exc:
+                    candidate.update({
+                        "status": "generation_failed",
+                        "failure_category": normalized_error_category(exc),
+                        "error": str(exc),
+                    })
+                    rejections.append({
+                        "candidate_id": candidate_id,
+                        "stage": "candidate_generation",
+                        "decision": "rejected",
+                        "reason_codes": [normalized_error_category(exc)],
+                        "error": str(exc),
+                    })
+                candidates.append(candidate)
+        dataset_store.put_bytes(keys["candidates"], _jsonl(candidates), media_type="application/x-ndjson")
+        dataset_store.put_bytes(keys["model-calls-generation"], _jsonl(calls), media_type="application/x-ndjson")
+        checkpoint("candidate_generation", [keys["candidates"], keys["model-calls-generation"]], len(candidates))
+    jobs.append_event(identity.job_id, "stage_completed", {
+        "stage": "candidate_generation",
+        "candidate_count": len(candidates),
+        "generation_failure_count": sum(item.get("status") != "generated" for item in candidates),
+    })
+
+    answer_requirements = _read_jsonl(dataset_store, keys["answer-requirements"])
+    source_answerability = _read_jsonl(dataset_store, keys["source-answerability"])
+    reference_qualification = _read_jsonl(dataset_store, keys["reference-qualification"])
+    decisions = _read_jsonl(dataset_store, keys["qualification-decisions"])
+    accepted = _read_jsonl(dataset_store, keys["accepted"])
+    needs_review = _read_jsonl(dataset_store, keys["needs-review"])
+    records_payload = _read_jsonl(dataset_store, keys["records"])
+
+    _check_cancel(jobs, identity.job_id, "qualification")
+    jobs.append_event(identity.job_id, "stage_started", {"stage": "qualification"})
+    if not _completed_checkpoint(dataset_store, dataset_root, "qualification", checkpoint_identity, {}):
+        answer_requirements = []
+        source_answerability = []
+        reference_qualification = []
+        decisions = []
+        accepted = []
+        needs_review = []
+        qualification_rejections = [
+            {
+                "candidate_id": candidate["candidate_id"],
+                "stage": "candidate_generation",
+                "decision": "rejected",
+                "reason_codes": [candidate.get("failure_category", "invalid_response")],
+                "error": candidate.get("error", "generation failed"),
+            }
+            for candidate in candidates
+            if candidate.get("status") != "generated"
+        ]
+        proposed_records: list[dict[str, Any]] = []
+        pipeline = QualificationPipeline(
+            pool=pool,
+            role_configs={
+                name: _role_config(config, name)
+                for name in ("answer_requirements", "source_answerability", "reference_qualification")
+            },
+            context_limit=config.context_limit_tokens,
+            prompt_versions=config.prompt_versions,
+            max_attempts=config.qualification_max_attempts,
+        )
+        for candidate in candidates:
+            if candidate.get("status") != "generated":
+                continue
+            _check_cancel(jobs, identity.job_id, "qualification")
+            result_key = f"{dataset_root}/qualification-results/{candidate['candidate_id']}.json"
+            if dataset_store.exists(result_key):
+                with dataset_store.open(result_key) as handle:
+                    frozen_result = json.load(handle)
+                calls.extend(frozen_result.get("model_calls", []))
+            else:
+                call_start = len(calls)
+                result = pipeline.qualify(
+                    question=candidate["question"],
+                    reference=candidate["reference"],
+                    source_text=candidate["source_text"],
+                    provenance=candidate["provenance"],
+                    evidence_ids=[candidate["evidence_id"]],
+                    calls=calls,
+                )
+                frozen_result = {
+                    "candidate_id": candidate["candidate_id"],
+                    "answer_requirements": result.answer_requirements,
+                    "source_answerability": result.source_answerability,
+                    "reference_qualification": result.reference_qualification,
+                    "decision": result.decision,
+                    "raw_attempts": result.raw_attempts,
+                    "model_calls": calls[call_start:],
+                }
+                dataset_store.put_json_idempotent(result_key, frozen_result)
+                jobs.append_event(identity.job_id, "qualification_record_completed", {
+                    "candidate_id": candidate["candidate_id"],
+                    "decision": result.decision["decision"],
+                })
+            common = {"candidate_id": candidate["candidate_id"]}
+            if frozen_result["answer_requirements"] is not None:
+                answer_requirements.append({**common, **frozen_result["answer_requirements"]})
+            if frozen_result["source_answerability"] is not None:
+                source_answerability.append({**common, **frozen_result["source_answerability"]})
+            if frozen_result["reference_qualification"] is not None:
+                reference_qualification.append({**common, **frozen_result["reference_qualification"]})
+            decision = {**common, **frozen_result["decision"], "raw_attempts": frozen_result["raw_attempts"]}
+            decisions.append(decision)
+            if decision["decision"] == "accepted":
+                accepted.append({**common, "question": candidate["question"], "reference": candidate["reference"]})
+                provenance = candidate["provenance"]
+                proposed_records.append(DatasetRecord(
+                    record_id=deterministic_id(identity.dataset_id, candidate["candidate_id"], candidate["question"], candidate["reference"]),
+                    messages=(
+                        {"role": "user", "content": candidate["question"]},
+                        {"role": "assistant", "content": candidate["reference"]},
+                    ),
+                    split="",
+                    metadata={
+                        "recipe": recipe,
+                        **provenance,
+                        "generator_model": config.generator.model,
+                        "qualification_models": _qualified_models(config),
+                        "prompt_versions": dict(config.prompt_versions),
+                        "candidate_id": candidate["candidate_id"],
+                        "enrichment_id": _enrichment_id(
+                            [next(item for item in evidence if item.evidence_id == candidate["evidence_id"])],
+                            representation_type="training-record",
+                            generation_method=recipe,
+                            model_version=config.generator.model,
+                            configuration=asdict(config),
+                        ),
+                    },
+                ).to_dict())
+            elif decision["decision"] == "needs_review":
+                needs_review.append({**common, "question": candidate["question"], "reference": candidate["reference"], **decision})
+            else:
+                qualification_rejections.append({**common, "stage": "qualification", "question": candidate["question"], "reference": candidate["reference"], **decision})
+
+        records_payload, duplicate_count = deduplicate_records(proposed_records, split_seed=config.split_seed)
+        for record in records_payload:
+            metadata = dict(record["metadata"])
+            if record["split"] == "train":
+                metadata.update({"research_role": "training", "training_eligible": True})
+            else:
+                metadata.update({"research_role": f"legacy_{record['split']}", "training_eligible": False, "original_split": record["split"]})
+            record["metadata"] = metadata
+
+        artifact_rows = {
+            keys["answer-requirements"]: answer_requirements,
+            keys["source-answerability"]: source_answerability,
+            keys["reference-qualification"]: reference_qualification,
+            keys["qualification-decisions"]: decisions,
+            keys["accepted"]: accepted,
+            keys["rejected"]: qualification_rejections,
+            keys["needs-review"]: needs_review,
+            keys["records"]: records_payload,
+            keys["model-calls"]: calls,
+        }
+        for artifact_key, rows in artifact_rows.items():
+            dataset_store.put_bytes(artifact_key, _jsonl(rows), media_type="application/x-ndjson")
+        rejections = qualification_rejections
+        checkpoint("qualification", list(artifact_rows), len(decisions))
+    else:
+        rejections = _read_jsonl(dataset_store, keys["rejected"])
+        duplicate_count = 0
+    jobs.append_event(identity.job_id, "stage_completed", {
+        "stage": "qualification",
+        "accepted_count": len(accepted),
+        "rejected_count": len(rejections),
+        "needs_review_count": len(needs_review),
+    })
+
+    reason_counts: dict[str, int] = {}
+    for decision in decisions:
+        for reason in decision.get("reason_codes", []):
+            reason_counts[reason] = reason_counts.get(reason, 0) + 1
+    summary = {
+        "candidate_count": len(candidates),
+        "accepted_count": len(records_payload),
+        "qualification_accepted_count": len(accepted),
+        "rejected_count": len(rejections),
+        "qualification_rejected_count": sum(item.get("decision") == "rejected" for item in decisions),
+        "needs_review_count": len(needs_review),
+        "generation_failure_count": sum(item.get("status") != "generated" for item in candidates),
+        "duplicate_count": duplicate_count,
+        "reason_counts": reason_counts,
+    }
+    dataset_store.put_json_idempotent(summary_key, summary)
+
+    final_artifacts: dict[str, str] = {}
+    for artifact_key in [*keys.values(), summary_key]:
+        with dataset_store.open(artifact_key) as handle:
+            final_artifacts[artifact_key] = checksum(handle.read().decode("utf-8"))
+    manifest_payload = {
+        **_identity_fields(identity),
+        "dataset_name": dataset_name,
+        "recipe": recipe,
+        "schema_version": "cognityx.dataforge.dataset/v1",
+        "source_manifest_uri": input_manifest_uri,
+        "input_selection_uri": dataset_store.uri(f"{identity.run_root}/input-selection.json"),
+        "source_manifest_checksum": checksum(manifest),
+        "configuration_checksum": checksum(asdict(config)),
+        "effective_configuration": asdict(config),
+        "models": _qualified_models(config),
+        "prompt_versions": dict(config.prompt_versions),
+        "split_seed": config.split_seed,
+        **summary,
+        "train_count": sum(record["split"] == "train" for record in records_payload),
+        "validation_count": sum(record["split"] == "validation" for record in records_payload),
+        "test_count": sum(record["split"] == "test" for record in records_payload),
+        "eval_count": sum(record["split"] != "train" for record in records_payload),
+        "records_uri": dataset_store.uri(keys["records"]),
+        "records_checksum": final_artifacts[keys["records"]],
+        "qualification_artifacts": {
+            name: {"uri": dataset_store.uri(key), "checksum": final_artifacts[key]}
+            for name, key in keys.items()
+            if name != "records"
+        },
+        "qualification_summary_uri": dataset_store.uri(summary_key),
+        "qualification_summary_checksum": final_artifacts[summary_key],
+        "qualification_result_root_uri": dataset_store.uri(f"{dataset_root}/qualification-results"),
+        "provenance_refs": list(manifest.get("provenance_refs", ())),
+        "created_at": time.time(),
+    }
+    _check_cancel(jobs, identity.job_id, "finalization")
+    _write_checkpoint(dataset_store, dataset_root, "finalization", checkpoint_identity, final_artifacts, len(records_payload))
+    dataset_store.put_json_idempotent(f"{dataset_root}/manifest.json", manifest_payload)
+    jobs.append_event(identity.job_id, "stage_completed", {"stage": "finalization", "records_published": len(records_payload)})
+    jobs.append_event(identity.job_id, "build_completed", {"record_count": len(records_payload), "dataset_id": identity.dataset_id})
+    jobs.set_state(identity.job_id, "completed")
+    return {
+        **_identity_fields(identity),
+        "recipe": recipe,
+        "record_count": len(records_payload),
+        "dataset_manifest_uri": dataset_store.uri(f"{dataset_root}/manifest.json"),
+    }
+
+
 def build_dataset(
     input_manifest_uri: str | None,
     dataset_name: str,
@@ -569,6 +951,8 @@ def build_dataset(
             if recipe == "knowledge-unit-qa"
             else existing.get("models") == {name: asdict(getattr(config, name) or config.generator) for name in ("knowledge_unit", "probe_generator", "student", "probe_judge", "qa_generator", "validator")}
             if recipe == "knowledge-unit-probed-qa"
+            else existing.get("models") == _qualified_models(config)
+            if recipe == "paragraph-qa-qualified"
             else existing.get("generator") == asdict(config.generator)
         )
         if (
@@ -589,6 +973,11 @@ def build_dataset(
                 checkpoint_identity = json.load(handle)["identity"]
             if not all(_completed_checkpoint(dataset_store, dataset_root, stage, checkpoint_identity, {}) for stage in ("discovery", "student", "judgment", "selection", "qa_generation", "validation", "finalization")):
                 raise ValueError("Existing staged probed dataset is incomplete or has invalid checkpoints")
+        if recipe == "paragraph-qa-qualified":
+            with dataset_store.open(_checkpoint_key(dataset_root, "finalization")) as handle:
+                checkpoint_identity = json.load(handle)["identity"]
+            if not all(_completed_checkpoint(dataset_store, dataset_root, stage, checkpoint_identity, {}) for stage in ("candidate_generation", "qualification", "finalization")):
+                raise ValueError("Existing qualified paragraph dataset is incomplete or has invalid checkpoints")
         return {
             "run_id": existing["run_id"],
             "job_id": existing["job_id"],
@@ -664,6 +1053,28 @@ def build_dataset(
                 jobs.set_state(job.job_id, "failed")
             _persist_run_events(dataset_store, identity.run_root, jobs, job.job_id)
             raise
+    if recipe == "paragraph-qa-qualified":
+        try:
+            result = _build_paragraph_qualified(
+                manifest=manifest,
+                dataset_name=dataset_name,
+                config=config,
+                runtime=runtime,
+                jobs=jobs,
+                inference_client=InferenceClientPool(config=config, injected_client=inference_client) if inference_client is not None else InferenceClientPool(config=config),
+                dataset_store=dataset_store,
+                dataset_root=dataset_root,
+                identity=identity,
+                input_manifest_uri=resolved_source.source_manifest_uri,
+            )
+            _persist_run_events(dataset_store, identity.run_root, jobs, job.job_id)
+            return result
+        except Exception as exc:
+            if jobs.get(job.job_id).state != "cancelled":
+                jobs.append_event(job.job_id, "build_failed", {"error": str(exc), "error_type": type(exc).__name__})
+                jobs.set_state(job.job_id, "failed")
+            _persist_run_events(dataset_store, identity.run_root, jobs, job.job_id)
+            raise
     try:
         evidence_groups = []
         for evidence_ref in manifest["evidence_refs"]:
@@ -714,7 +1125,13 @@ def build_dataset(
             for start, end, text, unit in spans:
                 if jobs.get(job.job_id).state == "cancellation_requested":
                     raise KeyboardInterrupt("DataForge build cancellation requested")
-                candidate = {"evidence_id": item.evidence_id, "char_start": start, "char_end": end, "text": text}
+                candidate = _paragraph_candidate(
+                    item,
+                    dataset_name=dataset_name,
+                    char_start=start,
+                    char_end=end,
+                    text=text,
+                ) if recipe == "paragraph-qa" else {"evidence_id": item.evidence_id, "char_start": start, "char_end": end, "text": text}
                 candidates.append(candidate)
                 try:
                     if recipe == "knowledge-unit-qa":
@@ -729,7 +1146,14 @@ def build_dataset(
                             evidence_ids=[item.evidence_id],
                             calls=calls,
                         )
+                        candidate.update({
+                            "status": "generated",
+                            "question": generated["instruction"],
+                            "reference": generated["answer"],
+                            "request_metadata": dict(calls[-1]),
+                        })
                 except Exception as exc:
+                    candidate.update({"status": "generation_failed", "error": str(exc)})
                     rejections.append({**candidate, "reason": str(exc)})
                     continue
                 if recipe == "knowledge-unit-qa":

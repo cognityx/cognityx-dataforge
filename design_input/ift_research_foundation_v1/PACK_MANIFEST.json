@@ -1,0 +1,104 @@
+{
+  "schema_version": "cognityx.design-input-pack/v1",
+  "pack_id": "ift_research_foundation_v1",
+  "purpose": "Design inputs and frozen empirical fixtures for the bounded DataForge qualification + Training research/tracking Codex task.",
+  "installation_path": "design_input/ift_research_foundation_v1/",
+  "file_count": 18,
+  "files": [
+    {
+      "path": "CODEX_MASTER_PROMPT.md",
+      "size_bytes": 39432,
+      "sha256": "d9ab1142d99e284033ef5b54163bc60914d753a48fa666c5da9f41b96d1036c4"
+    },
+    {
+      "path": "README.md",
+      "size_bytes": 4130,
+      "sha256": "e3c36c13ec4ba13c25536bebcb67e4de6a6bb35102fd3d98e6f1291617553fa4"
+    },
+    {
+      "path": "empirical/baseline/lunavane_baseline_dataset_identity.json",
+      "size_bytes": 1457,
+      "sha256": "ff08e757fb029b5a5925f7b56ecadc8ff280b59821015515ee3ea6f7ffdf085e"
+    },
+    {
+      "path": "empirical/evaluation_sets/manual_v1_paraphrase_texts.json",
+      "size_bytes": 1094,
+      "sha256": "a3183dc70c838a907a17f073faa12c8322ae5fb0b58cfe725bbf44b1acb7b37d"
+    },
+    {
+      "path": "empirical/evaluation_sets/paraphrase_import_fixture_v1.jsonl",
+      "size_bytes": 2566,
+      "sha256": "6aade4ae2b58178dc3d5c66b9b05ad10f6198282704f58eb4e524afe1f42f73a"
+    },
+    {
+      "path": "empirical/qualification/deterministic_mutations_v1.jsonl",
+      "size_bytes": 4626,
+      "sha256": "dc05b466139fb238fee3f05fbd166dda360cdf99eb4dfd3ea36f6041ef5506f5"
+    },
+    {
+      "path": "empirical/qualification/e3_qa_qualification_cases_v1.jsonl",
+      "size_bytes": 5234,
+      "sha256": "eb0c72c38cde6ebad64cbe57c2912f774ab6dae2cbfb4bbdb8641a48a5ed1edf"
+    },
+    {
+      "path": "empirical/qualification/e3_source_grounded_cases_v2.jsonl",
+      "size_bytes": 5845,
+      "sha256": "3e34b48c2d7b30f0c3f7d459b9888777bd4de06682271237bd5d734dcdc5489c"
+    },
+    {
+      "path": "empirical/qualification/expected_qualification_v1.jsonl",
+      "size_bytes": 2899,
+      "sha256": "43e980bc739c070b6d3cfb068c56cef075db2a075899401312d9186ce2e98535"
+    },
+    {
+      "path": "empirical/source/lunavane_hr_policy_provenance_fixture_v2_parsed.md",
+      "size_bytes": 8535,
+      "sha256": "46baf8f0532dd5d657770b9ecf43abe9e6e4bede94dacc2cdb94f3637e02ebed"
+    },
+    {
+      "path": "requirements/cognityx_adaptive_evaluator_failure_register_v0_9.md",
+      "size_bytes": 28899,
+      "sha256": "3300434ca8c442e3bcae6a631e6eb80897d1f85a5a011dfa1df7cd3a7cc4cced"
+    },
+    {
+      "path": "requirements/cognityx_consolidated_issue_handoff_2026-08-09.md",
+      "size_bytes": 26255,
+      "sha256": "85c30f46b78b12864e2b19bdcbd02b062b4746f0d173cf09ffe5f5dbe14253a4"
+    },
+    {
+      "path": "requirements/cognityx_deep_research_prompt_v2_2026-08-10.md",
+      "size_bytes": 17036,
+      "sha256": "b7a901a6a7f00d544b500513829c5557cf8932601951707497ec6df5fdd91ee5"
+    },
+    {
+      "path": "requirements/cognityx_research_thought_inventory_deep_research_handoff_2026-08-10_v3.md",
+      "size_bytes": 41697,
+      "sha256": "fdf91274f7fad79b4bfac95a8138377839dab28a61eb7e834948d234c19418fe"
+    },
+    {
+      "path": "research/Cognityx Research-Area Literature Count and Prior-Art Inventory.docx",
+      "size_bytes": 41647,
+      "sha256": "36087e2dd57d13899d451241f7d38918951703116f7150745ca519e7ff0473e1"
+    },
+    {
+      "path": "research/Cognityx_IFT_Radically_Narrowed_Research_Program_key_decisions.md",
+      "size_bytes": 6386,
+      "sha256": "b6491a612268788efc5a0036797890fd5f21e24f2ea9f7b52c1dd7bc4f7799bb"
+    },
+    {
+      "path": "research/Evidence-Based Recipe for Policy-Document IPT and Low-Cost 8–14B LLM Adaptation on RTX 4090_5090.docx",
+      "size_bytes": 95171,
+      "sha256": "693e353dd4242bb61f7bce1f7b8913605284f16335e114fda3f2defafd3b919c"
+    },
+    {
+      "path": "supporting/global_n_dataforge_cli_issues_upto_6.docx",
+      "size_bytes": 47042,
+      "sha256": "c28d10b1024922fea002526abd7bc4969ce476dd57e4fa9a0a39bf1069ffb35a"
+    }
+  ],
+  "notes": [
+    "The original LunaVane verified DOCX binary is not embedded; use the parsed source reference and exact JSONL evidence for qualification tests, and existing Ingest producer fixtures for a provenance-resolution integration test.",
+    "Historical Storage URIs in baseline identity files are lineage evidence and may not resolve outside the original workstation.",
+    "Production code must not depend on design_input files."
+  ]
+}
