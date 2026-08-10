@@ -32,7 +32,48 @@ def _requirements(raw: str) -> dict[str, Any]:
     value = _json_object(raw)
     if not isinstance(value.get("required_slots"), list) or not value.get("answer_structure"):
         raise QualificationOutputError("answer requirements need required_slots and answer_structure")
-    return {"schema": ANSWER_REQUIREMENTS_SCHEMA, **value}
+    specifications = value.get("requirements")
+    if specifications is None:
+        specifications = [
+            {
+                "requirement_id": str(slot),
+                "semantic_role": str(slot),
+                "value_type": "unspecified",
+            }
+            for slot in value["required_slots"]
+        ]
+    if not isinstance(specifications, list) or any(
+        not isinstance(item, dict) or not item.get("requirement_id")
+        for item in specifications
+    ):
+        raise QualificationOutputError("answer requirements requirements must be a list of identified objects")
+    identifiers = [str(item["requirement_id"]) for item in specifications]
+    if len(identifiers) != len(set(identifiers)):
+        raise QualificationOutputError("answer requirement IDs must be unique")
+    question_validity = value.get("question_validity", "valid")
+    if question_validity not in {"valid", "invalid", "uncertain"}:
+        raise QualificationOutputError("question_validity must be valid, invalid, or uncertain")
+    return {
+        "schema": ANSWER_REQUIREMENTS_SCHEMA,
+        **value,
+        "question_validity": question_validity,
+        "allowed_inference_policy": value.get(
+            "allowed_inference_policy", "source_explicit_only"
+        ),
+        "requirements": specifications,
+    }
+
+
+def _contains_forbidden_source_field(value: Any) -> bool:
+    forbidden = {"source_text", "source_evidence", "raw_source_text", "evidence_text"}
+    if isinstance(value, dict):
+        return any(
+            key in forbidden or _contains_forbidden_source_field(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, list):
+        return any(_contains_forbidden_source_field(item) for item in value)
+    return False
 
 
 def _answerability(raw: str) -> dict[str, Any]:
@@ -41,7 +82,45 @@ def _answerability(raw: str) -> dict[str, Any]:
         raise QualificationOutputError("source answerability needs a boolean answerable_at_requested_specificity")
     if not isinstance(value.get("slot_values", {}), dict):
         raise QualificationOutputError("source answerability slot_values must be an object")
-    return {"schema": SOURCE_ANSWERABILITY_SCHEMA, **value}
+    if _contains_forbidden_source_field(value):
+        raise QualificationOutputError(
+            "source answerability must freeze supported facts and constraints, not raw source text"
+        )
+    bindings = value.get("requirement_bindings")
+    if bindings is None:
+        bindings = []
+        for requirement_id, expected in value.get("slot_values", {}).items():
+            binding: dict[str, Any] = {
+                "requirement_id": str(requirement_id),
+                "supported": True,
+            }
+            if isinstance(expected, dict) and "value" in expected:
+                binding.update(
+                    expected_value=expected["value"],
+                    value_type=expected.get("value_type", "number"),
+                    unit=expected.get("unit"),
+                    relation=expected.get("relation"),
+                    cardinality=expected.get("cardinality", expected.get("count")),
+                )
+            elif isinstance(expected, list):
+                binding.update(value_type="set", expected_members=expected)
+            else:
+                binding.update(expected_value=expected, value_type="text")
+            bindings.append(binding)
+    if not isinstance(bindings, list) or any(
+        not isinstance(item, dict) or not item.get("requirement_id")
+        for item in bindings
+    ):
+        raise QualificationOutputError(
+            "source answerability requirement_bindings must be a list of identified objects"
+        )
+    return {
+        "schema": SOURCE_ANSWERABILITY_SCHEMA,
+        **value,
+        "requirement_bindings": bindings,
+        "supported_claims": list(value.get("supported_claims", [])),
+        "evidence_anchors": list(value.get("evidence_anchors", [])),
+    }
 
 
 def _reference_qualification(raw: str) -> dict[str, Any]:
@@ -53,7 +132,23 @@ def _reference_qualification(raw: str) -> dict[str, Any]:
         raise QualificationOutputError("reference qualification needs numeric required_slot_coverage")
     if not 0.0 <= float(coverage) <= 1.0:
         raise QualificationOutputError("required_slot_coverage must be between 0 and 1")
-    return {"schema": REFERENCE_QUALIFICATION_SCHEMA, **value}
+    for name in (
+        "supported_claims",
+        "unsupported_claims",
+        "contradicted_claims",
+        "missing_required_facts",
+    ):
+        if not isinstance(value.get(name, []), list):
+            raise QualificationOutputError(f"reference qualification {name} must be a list")
+    return {
+        "schema": REFERENCE_QUALIFICATION_SCHEMA,
+        **value,
+        "supported_claims": list(value.get("supported_claims", [])),
+        "unsupported_claims": list(value.get("unsupported_claims", [])),
+        "contradicted_claims": list(value.get("contradicted_claims", [])),
+        "missing_required_facts": list(value.get("missing_required_facts", [])),
+        "requirement_results": list(value.get("requirement_results", [])),
+    }
 
 
 def _words_to_digits(value: str) -> str:
@@ -74,21 +169,92 @@ def _normalized(value: Any) -> str:
     return re.sub(r"[^a-z0-9.]+", " ", _words_to_digits(str(value))).strip()
 
 
-def _numeric_role_present(reference: str, *, value: Any, role: str, unit: str | None) -> bool:
-    normalized = _normalized(reference)
-    number = re.escape(_normalized(value))
-    role_terms = {
-        "sustained_wind_stop": "sustained",
-        "gust_stop": "gust",
-        "paid_hours_minimum": "paid hours",
+_GENERIC_ROLE_WORDS = frozenset({
+    "amount", "expected", "limit", "maximum", "minimum", "number", "numeric",
+    "required", "requirement", "rule", "stop", "threshold", "value",
+})
+
+
+def _semantic_role_terms(specification: dict[str, Any]) -> list[str]:
+    declared = specification.get("semantic_role_terms") or specification.get("role_terms")
+    if declared:
+        return [_normalized(item) for item in declared if _normalized(item)]
+    role = specification.get("semantic_role") or specification.get("requirement_id", "")
+    return [
+        token
+        for token in _normalized(role).split()
+        if token not in _GENERIC_ROLE_WORDS
+    ]
+
+
+def _numeric_role_present(
+    reference: str,
+    *,
+    value: Any,
+    specification: dict[str, Any],
+) -> bool:
+    tokens = [token.strip(".") for token in _normalized(reference).split()]
+    number = _normalized(value)
+    number_positions = [index for index, token in enumerate(tokens) if token == number]
+    if not number_positions:
+        return False
+    role_terms = _semantic_role_terms(specification)
+    unit_terms = _normalized(specification.get("unit", "")).split()
+    for position in number_positions:
+        window = tokens[max(0, position - 3):position + 4]
+        role_matches = not role_terms or any(term in window for term in role_terms)
+        unit_matches = not unit_terms or all(
+            any(token.rstrip("s") == term.rstrip("s") for token in window)
+            for term in unit_terms
+        )
+        if role_matches and unit_matches:
+            return True
+    return False
+
+
+def _requirement_specifications(
+    requirements: dict[str, Any],
+    answerability: dict[str, Any],
+) -> list[dict[str, Any]]:
+    declared = requirements.get("requirements")
+    if not isinstance(declared, list):
+        declared = [
+            {
+                "requirement_id": str(slot),
+                "semantic_role": str(slot),
+                "value_type": "unspecified",
+            }
+            for slot in requirements.get("required_slots", [])
+        ]
+    bindings = {
+        str(item.get("requirement_id")): item
+        for item in answerability.get("requirement_bindings", [])
+        if isinstance(item, dict) and item.get("requirement_id")
     }
-    role_term = role_terms.get(role, _normalized(role).replace(" stop", ""))
-    unit_term = _normalized(unit) if unit else ""
-    windows = (
-        rf"{number}(?:\s+{re.escape(unit_term)})?\s+(?:\w+\s+){{0,3}}{re.escape(role_term)}",
-        rf"{re.escape(role_term)}(?:\s+\w+){{0,3}}\s+{number}(?:\s+{re.escape(unit_term)})?",
-    )
-    return any(re.search(pattern, normalized) for pattern in windows)
+    slot_values = answerability.get("slot_values", {})
+    specifications: list[dict[str, Any]] = []
+    for item in declared:
+        specification = dict(item)
+        requirement_id = str(specification.get("requirement_id"))
+        specification.update(bindings.get(requirement_id, {}))
+        if requirement_id in slot_values and "expected_value" not in specification:
+            expected = slot_values[requirement_id]
+            if isinstance(expected, dict) and "value" in expected:
+                specification.update(
+                    expected_value=expected["value"],
+                    value_type=expected.get("value_type", "number"),
+                    unit=expected.get("unit", specification.get("unit")),
+                    relation=expected.get("relation", specification.get("relation")),
+                    cardinality=expected.get(
+                        "cardinality", expected.get("count", specification.get("cardinality"))
+                    ),
+                )
+            elif isinstance(expected, list):
+                specification.update(value_type="set", expected_members=expected)
+            else:
+                specification["expected_value"] = expected
+        specifications.append(specification)
+    return specifications
 
 
 def deterministic_reference_checks(
@@ -105,34 +271,60 @@ def deterministic_reference_checks(
     if not provenance_resolvable:
         reasons.append("provenance_unresolvable")
 
-    slot_values = answerability.get("slot_values", {})
     normalized_reference = _normalized(reference)
-    for slot in requirements.get("required_slots", []):
-        expected = slot_values.get(slot)
-        if isinstance(expected, dict) and "value" in expected:
+    qualification_results = {
+        str(item.get("requirement_id")): item
+        for item in qualification.get("requirement_results", [])
+        if isinstance(item, dict) and item.get("requirement_id")
+    }
+    for specification in _requirement_specifications(requirements, answerability):
+        requirement_id = str(specification.get("requirement_id"))
+        expected = specification.get("expected_value")
+        value_type = specification.get("value_type")
+        if value_type == "number" and expected is not None:
             if not _numeric_role_present(
                 reference,
-                value=expected["value"],
-                role=str(slot),
-                unit=str(expected.get("unit")) if expected.get("unit") else None,
+                value=expected,
+                specification=specification,
             ):
                 reasons.append("numeric_role_binding_failed")
-        elif isinstance(expected, list):
-            missing = [item for item in expected if _normalized(item) not in normalized_reference]
+        elif value_type == "set" or specification.get("expected_members") is not None:
+            expected_members = specification.get("expected_members", [])
+            missing = [
+                item for item in expected_members
+                if _normalized(item) not in normalized_reference
+            ]
             if missing:
                 reasons.append("missing_required_members")
-        elif expected is not None and requirements.get("answer_structure") == "exact_phrase":
+        elif (
+            expected is not None
+            and (
+                value_type in {"exact_phrase", "identifier"}
+                or specification.get("match_policy") in {"exact", "exact_phrase", "canonical"}
+                or requirements.get("answer_structure") == "exact_phrase"
+            )
+        ):
             if _normalized(expected) not in normalized_reference:
                 reasons.append("incomplete_exact_phrase")
-
-    if slot_values.get("logical_relation") == "OR" and " or " not in f" {normalized_reference} ":
-        reasons.append("numeric_role_binding_failed")
-    if "exactly" in _normalized(answerability.get("source_text", "")) and "exactly" not in normalized_reference:
-        reasons.append("missing_mandatory_qualifier")
-    if "or higher" in normalized_reference and "or higher" not in _normalized(answerability.get("source_text", "")):
-        reasons.append("unsupported_claim")
+        result = qualification_results.get(requirement_id, {})
+        if result.get("relation_matches") is False:
+            reasons.append("numeric_role_binding_failed")
+        if result.get("qualifiers_present") is False:
+            reasons.append("missing_mandatory_qualifier")
+        for qualifier in specification.get("required_qualifiers", []):
+            if isinstance(qualifier, str):
+                continue
+            if not isinstance(qualifier, dict):
+                continue
+            if qualifier.get("match_policy") not in {"exact", "exact_phrase", "canonical"}:
+                continue
+            canonical = qualifier.get("canonical_text") or qualifier.get("value")
+            if canonical and _normalized(canonical) not in normalized_reference:
+                reasons.append("missing_mandatory_qualifier")
 
     if qualification.get("numeric_role_binding") is False:
+        reasons.append("numeric_role_binding_failed")
+    if qualification.get("logical_relation_matches") is False:
         reasons.append("numeric_role_binding_failed")
     if qualification.get("premise_restatement") is True:
         reasons.append("premise_restatement")
@@ -144,7 +336,14 @@ def deterministic_reference_checks(
         reasons.append("incomplete_exact_phrase")
     if qualification.get("mandatory_qualifiers_present") is False:
         reasons.append("missing_mandatory_qualifier")
-    if qualification.get("unsupported_claims"):
+    inference_policy = answerability.get(
+        "allowed_inference_policy",
+        requirements.get("allowed_inference_policy", "source_explicit_only"),
+    )
+    if qualification.get("unsupported_claims") and (
+        inference_policy == "source_explicit_only"
+        or qualification.get("unsupported_claims_material", True)
+    ):
         reasons.append("unsupported_claim")
     if qualification.get("unsupported_reference_claims"):
         reasons.append("unsupported_reference_claim")
@@ -168,29 +367,111 @@ def qualification_decision(
             "decision": "needs_review",
             "reason_codes": ["qualification_infrastructure_uncertainty"],
             "quality_label": "not_determined",
+            "question_validity": "not_determined",
+            "answerable_at_requested_specificity": None,
+            "reference_correctness": "not_assessable",
+            "reference_completeness": "not_assessable",
+            "source_faithfulness": "not_assessable",
+            "supported_claims": [],
+            "unsupported_claims": [],
+            "contradicted_claims": [],
+            "deterministic_gate_results": {},
+            "qualification_infrastructure_status": "uncertain",
+            "operational_acceptance": "needs_review",
             "rewrite_allowed": False,
         }
 
     reasons: list[str] = []
-    if not answerability.get("answerable_at_requested_specificity", False):
+    question_validity = str(requirements.get("question_validity", "valid"))
+    if question_validity == "invalid":
+        reasons.append("question_invalid")
+    elif question_validity == "uncertain":
+        reasons.append("question_validity_uncertain")
+    answerable = bool(answerability.get("answerable_at_requested_specificity", False))
+    if not answerable:
         reasons.append("source_not_answerable_at_requested_specificity")
-    if not qualification.get("answers_question", False):
+    answers_question = bool(qualification.get("answers_question", False))
+    if not answers_question:
         reasons.append("reference_does_not_answer_question")
-    if answerability.get("answerable_at_requested_specificity", False) and float(qualification.get("required_slot_coverage", 0.0)) < 1.0:
+    coverage = float(qualification.get("required_slot_coverage", 0.0))
+    if answerable and coverage < 1.0:
         reasons.append("missing_required_facts")
-    reasons.extend(deterministic_reference_checks(
+    deterministic_failures = deterministic_reference_checks(
         requirements,
         answerability,
         qualification,
         reference,
         provenance_resolvable=provenance_resolvable,
-    ))
+    )
+    reasons.extend(deterministic_failures)
     reasons = list(dict.fromkeys(reasons))
+    supported_claims = list(qualification.get("supported_claims", []))
+    unsupported_claims = list(qualification.get("unsupported_claims", []))
+    contradicted_claims = list(qualification.get("contradicted_claims", []))
+    reference_correctness = qualification.get("reference_correctness")
+    if reference_correctness is None:
+        if not answerable:
+            reference_correctness = "not_assessable"
+        elif contradicted_claims:
+            reference_correctness = "incorrect"
+        elif answers_question and coverage >= 1.0:
+            reference_correctness = "correct"
+        elif answers_question and coverage > 0.0:
+            reference_correctness = "partially_correct"
+        else:
+            reference_correctness = "incorrect"
+    reference_completeness = qualification.get("reference_completeness")
+    if reference_completeness is None:
+        if not answerable:
+            reference_completeness = "not_assessable"
+        else:
+            reference_completeness = "complete" if coverage >= 1.0 else "incomplete"
+    source_faithfulness = qualification.get("source_faithfulness")
+    if unsupported_claims or contradicted_claims:
+        source_faithfulness = "failed"
+    elif source_faithfulness is None:
+        source_faithfulness = "passed"
+    if (
+        source_faithfulness == "failed"
+        and not unsupported_claims
+        and not contradicted_claims
+    ):
+        reasons.append("source_faithfulness_failed")
+    decision = (
+        "needs_review"
+        if question_validity == "uncertain"
+        else "rejected" if reasons else "accepted"
+    )
+    quality_label = (
+        "qualified"
+        if decision == "accepted"
+        else "not_determined" if decision == "needs_review" else str(reference_correctness)
+    )
+    gate_results = {
+        "question_valid": question_validity == "valid",
+        "source_answerable_at_requested_specificity": answerable,
+        "reference_answers_question": answers_question,
+        "required_facts_complete": coverage >= 1.0,
+        "source_faithful": source_faithfulness == "passed",
+        "provenance_resolvable": provenance_resolvable,
+        "deterministic_failures": deterministic_failures,
+    }
     return {
         "schema": QUALIFICATION_DECISION_SCHEMA,
-        "decision": "rejected" if reasons else "accepted",
+        "decision": decision,
         "reason_codes": reasons,
-        "quality_label": "incorrect" if reasons else "qualified",
+        "quality_label": quality_label,
+        "question_validity": question_validity,
+        "answerable_at_requested_specificity": answerable,
+        "reference_correctness": reference_correctness,
+        "reference_completeness": reference_completeness,
+        "source_faithfulness": source_faithfulness,
+        "supported_claims": supported_claims,
+        "unsupported_claims": unsupported_claims,
+        "contradicted_claims": contradicted_claims,
+        "deterministic_gate_results": gate_results,
+        "qualification_infrastructure_status": "reliable",
+        "operational_acceptance": decision,
         "rewrite_allowed": False,
     }
 
@@ -291,8 +572,6 @@ class QualificationPipeline:
         if answerability is None:
             decision = qualification_decision(requirements, None, None, reference, infrastructure_uncertainty=True)
             return QualificationResult(requirements, None, None, decision, attempts)
-        answerability = {**answerability, "source_text": source_text}
-
         reference_result = self._stage(
             "reference_qualification",
             {

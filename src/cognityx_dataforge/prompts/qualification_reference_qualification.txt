@@ -1,5 +1,9 @@
 Compare the generated reference with the frozen question requirements and the
 frozen source-answerability result. Return answers_question,
-required_slot_coverage (0 through 1), unsupported_claims, contradicted_claims,
-premise_restatement, and any applicable deterministic check fields. Never
-rewrite the reference and never invent missing authority, identity, or facts.
+required_slot_coverage (0 through 1), reference_correctness,
+reference_completeness, source_faithfulness, supported_claims,
+unsupported_claims, contradicted_claims, missing_required_facts,
+premise_restatement, and requirement_results keyed by requirement_id. Use only
+the source-supported facts and constraints frozen by Stage B; raw source text is
+intentionally unavailable here. Never rewrite the reference and never invent
+missing authority, identity, or facts.

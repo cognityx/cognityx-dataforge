@@ -8,15 +8,24 @@ from cognityx_jobs import JobRepository
 from cognityx_storage import StorageConfig, StorageRuntime
 
 from cognityx_dataforge.build import build_dataset
-from cognityx_dataforge.qualification import qualification_decision
+from cognityx_dataforge.qualification import (
+    QualificationPipeline,
+    qualification_decision,
+)
 from cognityx_dataforge.source import resolve_storage_uri
 
 
 PACK = Path(__file__).parents[1] / "design_input" / "ift_research_foundation_v1"
+FIXTURES = Path(__file__).parent / "fixtures" / "qualification"
 
 
 def _rows(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def _stage_input(request: dict) -> dict:
+    prompt = request["messages"][-1]["content"]
+    return json.loads(prompt.split("\n\nINPUT:\n", 1)[1])
 
 
 def test_frozen_historical_oracle_decisions():
@@ -67,7 +76,11 @@ def test_deterministic_mutation_reason_codes():
     unsupported = qualification_decision(
         numeric_requirements,
         {**numeric_source, "source_text": mutations["M009"]["source"]},
-        complete,
+        {
+            **complete,
+            "source_faithfulness": "failed",
+            "unsupported_claims": ["the threshold also applies to higher values"],
+        },
         mutations["M009"]["reference"],
     )
     assert "unsupported_claim" in unsupported["reason_codes"]
@@ -111,6 +124,152 @@ def test_deterministic_mutation_reason_codes():
         mutations["M010"]["reference"],
     )
     assert unanswerable["reason_codes"] == mutations["M010"]["expected_reason_codes"]
+
+
+def test_generic_finance_policy_uses_only_declarative_requirements():
+    fixture = json.loads(
+        (FIXTURES / "finance_policy_generic_v1.json").read_text(encoding="utf-8")
+    )
+    accepted = qualification_decision(
+        fixture["answer_requirements"],
+        fixture["source_answerability"],
+        fixture["reference_qualification"],
+        fixture["reference"],
+    )
+    assert accepted["decision"] == "accepted"
+    assert accepted["reference_correctness"] == "correct"
+    assert accepted["source_faithfulness"] == "passed"
+
+    rejected = qualification_decision(
+        fixture["answer_requirements"],
+        fixture["source_answerability"],
+        {
+            **fixture["reference_qualification"],
+            "required_slot_coverage": 0.5,
+            "reference_correctness": "partially_correct",
+            "reference_completeness": "incomplete",
+            "supported_claims": ["one approval is required"],
+            "unsupported_claims": ["the budget analyst must approve"],
+            "missing_required_members": ["regional finance controller"],
+            "unsupported_members": ["budget analyst"],
+        },
+        "It requires one approval from the cost-centre owner and a budget analyst.",
+    )
+    assert rejected["decision"] == "rejected"
+    assert rejected["reference_correctness"] == "partially_correct"
+    assert rejected["reference_completeness"] == "incomplete"
+    assert rejected["source_faithfulness"] == "failed"
+    assert set(rejected["reason_codes"]) >= {
+        "missing_required_facts",
+        "numeric_role_binding_failed",
+        "missing_required_members",
+        "unsupported_members",
+        "unsupported_claim",
+    }
+
+
+def test_production_qualification_has_no_pilot_role_or_phrase_rules():
+    source = Path(QualificationPipeline.__module__.replace(".", "/"))
+    source = Path(__file__).parents[1] / "src" / source.with_suffix(".py")
+    text = source.read_text(encoding="utf-8").lower()
+    for forbidden in (
+        "sustained_wind_stop",
+        "gust_stop",
+        "paid_hours_minimum",
+        '"sustained"',
+        '"gust"',
+        '"paid hours"',
+        '"or higher"',
+    ):
+        assert forbidden not in text
+
+
+def test_quality_axes_do_not_collapse_operational_rejection():
+    decision = qualification_decision(
+        {
+            "question_validity": "valid",
+            "required_slots": ["policy_limit"],
+            "answer_structure": "numeric_rule",
+            "allowed_inference_policy": "source_explicit_only",
+            "requirements": [{
+                "requirement_id": "policy_limit",
+                "semantic_role": "policy limit",
+                "semantic_role_terms": ["limit"],
+                "value_type": "number",
+                "unit": "days",
+            }],
+        },
+        {
+            "answerable_at_requested_specificity": True,
+            "requirement_bindings": [{
+                "requirement_id": "policy_limit",
+                "expected_value": 5,
+                "value_type": "number",
+                "unit": "days",
+            }],
+        },
+        {
+            "answers_question": True,
+            "required_slot_coverage": 1.0,
+            "reference_correctness": "correct",
+            "reference_completeness": "complete",
+            "source_faithfulness": "failed",
+            "supported_claims": ["the limit is five days"],
+            "unsupported_claims": ["the limit automatically renews"],
+            "contradicted_claims": [],
+        },
+        "The limit is five days and it automatically renews.",
+    )
+    assert decision["decision"] == "rejected"
+    assert decision["quality_label"] == "correct"
+    assert decision["reference_correctness"] == "correct"
+    assert decision["source_faithfulness"] == "failed"
+    assert decision["operational_acceptance"] == "rejected"
+
+    explicit_failure = qualification_decision(
+        {
+            "question_validity": "valid",
+            "required_slots": [],
+            "answer_structure": "short_factual_rule",
+        },
+        {"answerable_at_requested_specificity": True},
+        {
+            "answers_question": True,
+            "required_slot_coverage": 1.0,
+            "reference_correctness": "correct",
+            "reference_completeness": "complete",
+            "source_faithfulness": "failed",
+            "supported_claims": [],
+            "unsupported_claims": [],
+            "contradicted_claims": [],
+        },
+        "A factually correct answer with a separately failed support check.",
+    )
+    assert explicit_failure["decision"] == "rejected"
+    assert explicit_failure["reason_codes"] == ["source_faithfulness_failed"]
+    assert explicit_failure["reference_correctness"] == "correct"
+
+
+def test_uncertain_question_validity_is_reviewed_not_accepted():
+    decision = qualification_decision(
+        {
+            "question_validity": "uncertain",
+            "required_slots": [],
+            "answer_structure": "short_factual_rule",
+        },
+        {"answerable_at_requested_specificity": True},
+        {
+            "answers_question": True,
+            "required_slot_coverage": 1.0,
+            "supported_claims": [],
+            "unsupported_claims": [],
+            "contradicted_claims": [],
+        },
+        "An otherwise acceptable answer.",
+    )
+    assert decision["question_validity"] == "uncertain"
+    assert decision["reference_correctness"] == "correct"
+    assert decision["operational_acceptance"] == "needs_review"
 
 
 class QualificationClient:
@@ -285,10 +444,27 @@ def test_qualified_recipe_is_candidate_blind_and_persists_all_stages(tmp_path: P
     by_role = {request["request_metadata"]["model_role"]: request for request in client.requests}
     stage_a = by_role["answer_requirements"]["messages"][-1]["content"]
     stage_b = by_role["source_answerability"]["messages"][-1]["content"]
+    stage_c = by_role["reference_qualification"]["messages"][-1]["content"]
     assert "generated_reference" not in stage_a
     assert "actual documented reason for a decision" not in stage_a.lower()
     assert "generated_reference" not in stage_b
     assert "The actual documented reason for a decision." not in stage_b
+    assert set(_stage_input(by_role["answer_requirements"])) == {"question"}
+    assert set(_stage_input(by_role["source_answerability"])) == {
+        "answer_requirements", "provenance", "source_evidence",
+    }
+    stage_c_input = _stage_input(by_role["reference_qualification"])
+    assert set(stage_c_input) == {
+        "answer_requirements", "source_answerability", "generated_reference",
+    }
+    assert "source_text" not in json.dumps(stage_c_input)
+    assert "PR-01 Clear Moon Principle" not in stage_c
+
+    source_artifact_uri = manifest["qualification_artifacts"]["source-answerability"]["uri"]
+    source_store, source_key = resolve_storage_uri(runtime, source_artifact_uri, role_name="dataset")
+    with source_store.open(source_key) as handle:
+        frozen_source_result = json.loads(handle.readline())
+    assert "source_text" not in json.dumps(frozen_source_result)
 
     reused = build_dataset(
         manifest_uri,

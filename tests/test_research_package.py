@@ -12,6 +12,7 @@ from cognityx_dataforge.research import (
     create_research_package,
     freeze_evaluation_set,
     import_evaluation_set,
+    load_research_package,
 )
 from cognityx_dataforge.source import resolve_storage_uri
 
@@ -73,6 +74,9 @@ def test_freeze_exact_recall_import_and_research_package(tmp_path: Path):
     assert exact_record["source_record_id"] == source_records[0]["record_id"]
     assert exact_record["research_role"] == "exact_recall"
     assert exact_record["split"] == "evaluation"
+    assert exact["created_at"]
+    assert exact["freeze_checksum"]
+    assert exact["manifest_checksum"]
 
     paraphrase = import_evaluation_set(
         runtime,
@@ -96,6 +100,8 @@ def test_freeze_exact_recall_import_and_research_package(tmp_path: Path):
         evaluation_manifest_uris=[exact["manifest_uri"], paraphrase["manifest_uri"]],
     )
     assert package["schema"] == "cognityx.dataforge.research-package/v1"
+    assert package["created_at"]
+    assert package["manifest_checksum"]
     assert {item["research_role"] for item in package["evaluation_sets"]} == {
         "exact_recall", "paraphrase_evaluation",
     }
@@ -106,6 +112,43 @@ def test_freeze_exact_recall_import_and_research_package(tmp_path: Path):
         evaluation_manifest_uris=[exact["manifest_uri"], paraphrase["manifest_uri"]],
     )
     assert repeated_package["research_package_version"] == package["research_package_version"]
+    assert load_research_package(runtime, package["manifest_uri"]) == {
+        key: value for key, value in package.items() if key != "manifest_uri"
+    }
+
+
+def test_import_identity_is_independent_of_machine_local_path(tmp_path: Path):
+    runtime = StorageRuntime.from_config(StorageConfig.built_in(root=tmp_path / "storage"))
+    content = (
+        PACK / "empirical/evaluation_sets/paraphrase_import_fixture_v1.jsonl"
+    ).read_bytes()
+    first_path = tmp_path / "machine-a" / "evaluation.jsonl"
+    second_path = tmp_path / "machine-b" / "copied-evaluation.jsonl"
+    first_path.parent.mkdir()
+    second_path.parent.mkdir()
+    first_path.write_bytes(content)
+    second_path.write_bytes(content)
+
+    first = import_evaluation_set(
+        runtime,
+        first_path,
+        evaluation_set_name="path-independent-import",
+        research_role="paraphrase_evaluation",
+    )
+    second = import_evaluation_set(
+        runtime,
+        second_path,
+        evaluation_set_name="path-independent-import",
+        research_role="paraphrase_evaluation",
+    )
+    assert second["evaluation_set_id"] == first["evaluation_set_id"]
+    assert second["evaluation_set_version"] == first["evaluation_set_version"]
+    assert second["freeze_checksum"] == first["freeze_checksum"]
+    assert second["manifest_checksum"] == first["manifest_checksum"]
+    serialized = json.dumps(second)
+    assert str(first_path) not in serialized
+    assert str(second_path) not in serialized
+    assert "input_path" not in serialized
 
 
 def test_evaluation_freeze_rejects_leakage_duplicates_and_missing_provenance(tmp_path: Path):
