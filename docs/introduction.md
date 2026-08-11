@@ -60,6 +60,9 @@ DataForge keeps different kinds of identity separate:
 - `experiment_id` names the overall research comparison.
 - `variant_id` identifies one recipe and its meaningful configuration.
 - `run_id` identifies one execution attempt.
+- An experiment orchestrator may supply `--run-id`. Reusing the same safe ID
+  makes a completed immutable build discoverable after a caller crash, so the
+  expensive preparation is returned instead of repeated.
 - `job_id` identifies its Cognityx Jobs lifecycle record.
 - `dataset_id` and `dataset_version` identify a successfully published,
   immutable dataset.

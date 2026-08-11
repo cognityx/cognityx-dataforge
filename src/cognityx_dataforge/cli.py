@@ -11,7 +11,7 @@ from cognityx_jobs import JobRepository
 from cognityx_storage import StorageConfig, StorageRuntime
 
 from cognityx_dataforge.build import _store_for_uri, build_dataset
-from cognityx_dataforge.execution import default_jobs_database, load_job_repository
+from cognityx_dataforge.execution import load_job_repository
 from cognityx_dataforge.recipes import normalize_recipe
 from cognityx_dataforge.research import (
     create_exact_recall_set,
@@ -57,6 +57,10 @@ def main() -> None:
         help="Deprecated alias for --source.",
     )
     build.add_argument("--experiment-id", required=True)
+    build.add_argument(
+        "--run-id",
+        help="Stable caller-supplied run identity for safe retry and resume.",
+    )
     build.add_argument("--dataset-name")
     recipe_group = build.add_mutually_exclusive_group()
     recipe_group.add_argument("--recipe")
@@ -176,6 +180,7 @@ def main() -> None:
             recipe,
             args.config,
             experiment_id=args.experiment_id,
+            requested_run_id=args.run_id,
             runtime=runtime,
             jobs=_jobs(args),
         ), indent=2))

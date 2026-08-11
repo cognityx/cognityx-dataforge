@@ -21,16 +21,22 @@ from cognityx_dataforge.evidence import (
     combine_evidence,
     evidence_availability,
     load_evidence_jsonl,
-    load_run_manifest,
     validate_context,
 )
-from cognityx_dataforge.inference import GeneratorAdapter, GeneratorConfig, InferenceClientPool, StructuredAdapter, TokenBudgetError, normalized_error_category
+from cognityx_dataforge.execution import BuildIdentity, load_job_repository
+from cognityx_dataforge.inference import (
+    GeneratorAdapter,
+    GeneratorConfig,
+    InferenceClientPool,
+    StructuredAdapter,
+    TokenBudgetError,
+    normalized_error_category,
+)
 from cognityx_dataforge.knowledge import KnowledgeUnit, parse_knowledge_units
 from cognityx_dataforge.models import DatasetRecord
 from cognityx_dataforge.paragraphs import paragraph_spans
-from cognityx_dataforge.recipes import normalize_recipe
 from cognityx_dataforge.qualification import QualificationPipeline
-from cognityx_dataforge.execution import BuildIdentity, load_job_repository
+from cognityx_dataforge.recipes import normalize_recipe
 from cognityx_dataforge.source import resolve_source, resolve_storage_uri
 
 
@@ -641,7 +647,7 @@ def _build_paragraph_qualified(
                         "reference": generated["answer"],
                         "request_metadata": dict(calls[-1]),
                     })
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 - record model failure
                     candidate.update({
                         "status": "generation_failed",
                         "failure_category": normalized_error_category(exc),
@@ -890,6 +896,7 @@ def build_dataset(
     variant: str | None = None,
     source: str | None = None,
     experiment_id: str | None = None,
+    requested_run_id: str | None = None,
     jobs_database: str | Path | None = None,
 ) -> dict[str, Any]:
     runtime = runtime or _runtime(storage_root, storage_config)
@@ -913,6 +920,7 @@ def build_dataset(
         recipe=recipe,
         configuration_checksum=expected_config_checksum,
         source_checksum=expected_source_checksum,
+        requested_run_id=requested_run_id,
     )
     if experiment_id is None:
         legacy_dataset_id = deterministic_id(dataset_name, recipe)
@@ -1152,7 +1160,7 @@ def build_dataset(
                             "reference": generated["answer"],
                             "request_metadata": dict(calls[-1]),
                         })
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 - record model failure
                     candidate.update({"status": "generation_failed", "error": str(exc)})
                     rejections.append({**candidate, "reason": str(exc)})
                     continue
