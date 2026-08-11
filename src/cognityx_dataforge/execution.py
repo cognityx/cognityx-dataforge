@@ -39,10 +39,13 @@ class BuildIdentity:
         recipe: str,
         configuration_checksum: str,
         source_checksum: str,
-    ) -> "BuildIdentity":
+        requested_run_id: str | None = None,
+    ) -> BuildIdentity:
         experiment_id = validate_identifier("experiment_id", experiment_id)
         variant_id = deterministic_id(recipe, configuration_checksum)
-        run_id = f"run-{uuid4().hex}"
+        run_id = validate_identifier(
+            "requested_run_id", requested_run_id or f"run-{uuid4().hex}"
+        )
         return cls(
             experiment_id=experiment_id,
             variant_id=variant_id,

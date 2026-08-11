@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 import sys
+from pathlib import Path
 
 import pytest
 from cognityx_jobs import JobRepository
@@ -184,10 +184,12 @@ def test_identity_lineage_selection_and_manifest_written_last(tmp_path):
         "paragraph-qa",
         config,
         experiment_id="experiment-1",
+        requested_run_id="run-experiment-step-1",
         runtime=recording,
         jobs=jobs,
         inference_client=LineageClient(),
     )
+    assert result["run_id"] == "run-experiment-step-1"
     assert result["run_id"] != result["job_id"]
     assert result["variant_id"]
     assert jobs.get(result["job_id"]).state == "completed"
@@ -218,6 +220,20 @@ def test_identity_lineage_selection_and_manifest_written_last(tmp_path):
     ]
     assert publication_writes[-1] == manifest_key
 
+    reused = build_dataset(
+        manifest_uri,
+        "comparison",
+        "paragraph-qa",
+        config,
+        experiment_id="experiment-1",
+        requested_run_id="run-experiment-step-1",
+        runtime=recording,
+        jobs=jobs,
+        inference_client=LineageClient(),
+    )
+    assert reused["reused"] is True
+    assert reused["dataset_manifest_uri"] == result["dataset_manifest_uri"]
+
 
 def test_cancelled_build_keeps_run_artifacts_without_publication(tmp_path):
     runtime, manifest_uri, config = _fixture(tmp_path)
@@ -245,7 +261,7 @@ def test_cancelled_build_keeps_run_artifacts_without_publication(tmp_path):
     record = jobs.get(client.job_id)
     assert record.state == "cancelled"
     assert not runtime.for_role("dataset").exists(
-        f"dataforge/experiments/experiment-cancel/variants"
+        "dataforge/experiments/experiment-cancel/variants"
     ) or not any(
         path.name == "manifest.json" and "datasets" in path.parts
         for path in (tmp_path / "storage").rglob("manifest.json")
