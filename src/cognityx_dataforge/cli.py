@@ -13,6 +13,7 @@ from cognityx_storage import StorageConfig, StorageRuntime
 from cognityx_dataforge.build import _store_for_uri, build_dataset
 from cognityx_dataforge.config import resolve_dataforge_config
 from cognityx_dataforge.execution import load_job_repository
+from cognityx_dataforge.human import render_human
 from cognityx_dataforge.recipes import normalize_recipe
 from cognityx_dataforge.research import (
     create_exact_recall_set,
@@ -42,7 +43,14 @@ def _jobs(args: argparse.Namespace) -> JobRepository:
 
 
 def _records_checksum(data: bytes) -> str:
-    return hashlib.sha256(json.dumps(data.decode("utf-8"), sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+    return hashlib.sha256(
+        json.dumps(
+            data.decode("utf-8"),
+            sort_keys=True,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
 
 
 def main(argv: list[str] | None = None) -> int | None:
@@ -54,6 +62,7 @@ def main(argv: list[str] | None = None) -> int | None:
     for name in ("show", "validate"):
         command = config_sub.add_parser(name)
         command.add_argument("--config", required=True, type=Path)
+        command.add_argument("--human", action="store_true")
 
     build = sub.add_parser("build")
     build.add_argument("recipe_name", nargs="?")
@@ -76,6 +85,7 @@ def main(argv: list[str] | None = None) -> int | None:
     build.add_argument("--storage-root")
     build.add_argument("--storage-config")
     build.add_argument("--jobs-database")
+    build.add_argument("--human", action="store_true")
 
     dataset = sub.add_parser("dataset")
     dataset_sub = dataset.add_subparsers(dest="dataset_command", required=True)
@@ -86,6 +96,8 @@ def main(argv: list[str] | None = None) -> int | None:
         command.add_argument("--storage-config")
         if name == "export":
             command.add_argument("--output", required=True)
+        else:
+            command.add_argument("--human", action="store_true")
 
     job = sub.add_parser("job")
     job_sub = job.add_subparsers(dest="job_command", required=True)
@@ -95,9 +107,12 @@ def main(argv: list[str] | None = None) -> int | None:
         command.add_argument("--jobs-database")
         if name == "watch":
             command.add_argument("--interval", type=float, default=0.5)
+        command.add_argument("--human", action="store_true")
 
     evaluation_set = sub.add_parser("evaluation-set")
-    evaluation_sub = evaluation_set.add_subparsers(dest="evaluation_command", required=True)
+    evaluation_sub = evaluation_set.add_subparsers(
+        dest="evaluation_command", required=True
+    )
     exact_recall = evaluation_sub.add_parser("exact-recall")
     exact_recall.add_argument("dataset_manifest_uri")
     exact_recall.add_argument("--name")
@@ -112,9 +127,12 @@ def main(argv: list[str] | None = None) -> int | None:
     for command in (exact_recall, imported):
         command.add_argument("--storage-root")
         command.add_argument("--storage-config")
+        command.add_argument("--human", action="store_true")
 
     research_package = sub.add_parser("research-package")
-    research_sub = research_package.add_subparsers(dest="research_command", required=True)
+    research_sub = research_package.add_subparsers(
+        dest="research_command", required=True
+    )
     package_create = research_sub.add_parser("create")
     package_create.add_argument("--name", required=True)
     package_create.add_argument("--dataset-manifest", required=True)
@@ -124,6 +142,7 @@ def main(argv: list[str] | None = None) -> int | None:
     for command in (package_create, package_show):
         command.add_argument("--storage-root")
         command.add_argument("--storage-config")
+        command.add_argument("--human", action="store_true")
 
     args = parser.parse_args(argv)
     if args.command == "config":
@@ -147,15 +166,19 @@ def main(argv: list[str] | None = None) -> int | None:
                 "warnings": [],
                 "errors": [{"code": "configuration_invalid", "message": str(exc)}],
             }
-            print(json.dumps(report, indent=2, sort_keys=True))
+            _write(report, human=args.human)
             return 2
-        print(json.dumps(report, indent=2, sort_keys=True))
+        _write(report, human=args.human)
         return 0
     if args.command == "job":
         jobs = _jobs(args)
         if args.job_command == "cancel":
             jobs.request_cancel(args.job_id)
-            print(json.dumps({"job_id": args.job_id, "state": jobs.get(args.job_id).state}, indent=2))
+            _write(
+                {"job_id": args.job_id, "state": jobs.get(args.job_id).state},
+                human=args.human,
+                sort_keys=False,
+            )
             return
         after = 0
         while True:
@@ -163,8 +186,18 @@ def main(argv: list[str] | None = None) -> int | None:
             events = jobs.events(args.job_id, after=after)
             if events:
                 after = events[-1]["sequence"]
-            print(json.dumps({"job": record.__dict__, "events": events}, indent=2))
-            if args.job_command == "show" or record.state in {"completed", "failed", "cancelled", "interrupted"}:
+            _write(
+                {"job": record.__dict__, "events": events},
+                human=args.human,
+                sort_keys=False,
+                flush=True,
+            )
+            if args.job_command == "show" or record.state in {
+                "completed",
+                "failed",
+                "cancelled",
+                "interrupted",
+            }:
                 return
             time.sleep(args.interval)
 
@@ -183,7 +216,7 @@ def main(argv: list[str] | None = None) -> int | None:
                 evaluation_set_name=args.name,
                 research_role=args.research_role,
             )
-        print(json.dumps(result, indent=2, sort_keys=True))
+        _write(result, human=args.human)
         return
     if args.command == "research-package":
         if args.research_command == "create":
@@ -195,7 +228,7 @@ def main(argv: list[str] | None = None) -> int | None:
             )
         else:
             result = load_research_package(runtime, args.research_package_manifest_uri)
-        print(json.dumps(result, indent=2, sort_keys=True))
+        _write(result, human=args.human)
         return
     if args.command == "build":
         source = args.source or args.input_manifest
@@ -206,7 +239,7 @@ def main(argv: list[str] | None = None) -> int | None:
                 stacklevel=2,
             )
         recipe = normalize_recipe(args.recipe_name or args.recipe, variant=args.variant)
-        print(json.dumps(build_dataset(
+        result = build_dataset(
             source,
             args.dataset_name or args.experiment_id,
             recipe,
@@ -215,17 +248,37 @@ def main(argv: list[str] | None = None) -> int | None:
             requested_run_id=args.run_id,
             runtime=runtime,
             jobs=_jobs(args),
-        ), indent=2))
+        )
+        _write(result, human=args.human, sort_keys=False)
         return
-    manifest_store, manifest_key = _store_for_uri(runtime, args.dataset_manifest_uri, role_name="dataset")
+    manifest_store, manifest_key = _store_for_uri(
+        runtime, args.dataset_manifest_uri, role_name="dataset"
+    )
     with manifest_store.open(manifest_key) as handle:
         manifest = json.load(handle)
     if args.dataset_command == "show":
-        print(json.dumps(manifest, indent=2, sort_keys=True))
+        _write(manifest, human=args.human)
         return
-    records_store, records_key = _store_for_uri(runtime, manifest["records_uri"], role_name="dataset")
+    records_store, records_key = _store_for_uri(
+        runtime, manifest["records_uri"], role_name="dataset"
+    )
     with records_store.open(records_key) as handle:
         records = handle.read()
     if _records_checksum(records) != manifest["records_checksum"]:
         raise SystemExit("records.jsonl checksum verification failed")
     Path(args.output).write_bytes(records)
+
+
+def _write(
+    value: object,
+    *,
+    human: bool,
+    sort_keys: bool = True,
+    flush: bool = False,
+) -> None:
+    output = (
+        render_human(value)
+        if human
+        else json.dumps(value, indent=2, sort_keys=sort_keys)
+    )
+    print(output, flush=flush)

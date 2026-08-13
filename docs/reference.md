@@ -11,6 +11,22 @@ cognityx-dataforge config show --config dataforge.toml
 cognityx-dataforge config validate --config dataforge.toml
 ```
 
+Add `--human` to any finite structured command when a person is reading the
+result. JSON remains the unchanged default for scripts. The human view consumes
+the same completed payload and does not reopen Storage, rerun a build, or make a
+second Jobs or Inference call.
+
+```bash
+cognityx-dataforge config show --config dataforge.toml --human
+cognityx-dataforge dataset show <dataset-manifest-uri> --human
+cognityx-dataforge job show <job-id> --human
+cognityx-dataforge job watch <job-id> --human
+cognityx-dataforge research-package show <manifest-uri> --human
+```
+
+`dataset export` remains silent because its result is the requested output
+file. Job watch remains incremental and flushes each readable snapshot.
+
 Both commands emit deterministic JSON with the normalized path, exact file-byte
 SHA-256, effective values, and validation result. A missing or malformed file
 returns a nonzero status. The existing `build --config PATH` requirement is
