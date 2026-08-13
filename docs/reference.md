@@ -1,5 +1,21 @@
 # Reference
 
+## Inspect a scientific build recipe
+
+The DataForge TOML file is a scientific build recipe: it helps define dataset
+identity and therefore remains explicit. Inspect it without Storage, Jobs,
+Inference, dataset construction, or publication:
+
+```bash
+cognityx-dataforge config show --config dataforge.toml
+cognityx-dataforge config validate --config dataforge.toml
+```
+
+Both commands emit deterministic JSON with the normalized path, exact file-byte
+SHA-256, effective values, and validation result. A missing or malformed file
+returns a nonzero status. The existing `build --config PATH` requirement is
+unchanged.
+
 ## Configure Storage
 
 Normal DataForge commands use the same Cognityx Storage configuration as other

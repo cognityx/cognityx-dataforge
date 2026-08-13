@@ -11,6 +11,7 @@ from cognityx_jobs import JobRepository
 from cognityx_storage import StorageConfig, StorageRuntime
 
 from cognityx_dataforge.build import _store_for_uri, build_dataset
+from cognityx_dataforge.config import resolve_dataforge_config
 from cognityx_dataforge.execution import load_job_repository
 from cognityx_dataforge.recipes import normalize_recipe
 from cognityx_dataforge.research import (
@@ -44,9 +45,15 @@ def _records_checksum(data: bytes) -> str:
     return hashlib.sha256(json.dumps(data.decode("utf-8"), sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> int | None:
     parser = argparse.ArgumentParser(prog="cognityx-dataforge")
     sub = parser.add_subparsers(dest="command", required=True)
+
+    config = sub.add_parser("config")
+    config_sub = config.add_subparsers(dest="config_command", required=True)
+    for name in ("show", "validate"):
+        command = config_sub.add_parser(name)
+        command.add_argument("--config", required=True, type=Path)
 
     build = sub.add_parser("build")
     build.add_argument("recipe_name", nargs="?")
@@ -118,7 +125,32 @@ def main() -> None:
         command.add_argument("--storage-root")
         command.add_argument("--storage-config")
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    if args.command == "config":
+        try:
+            report = resolve_dataforge_config(args.config).to_dict()
+        except (OSError, UnicodeError, ValueError, KeyError, TypeError) as exc:
+            report = {
+                "component": "dataforge",
+                "configuration_kind": "scientific-workload",
+                "valid": False,
+                "master_config": {
+                    "kind": "file",
+                    "path": str(args.config.expanduser().resolve()),
+                    "selected_by": "explicit",
+                    "sha256": None,
+                },
+                "config_layers": [],
+                "field_sources": {},
+                "overrides": [],
+                "effective": {},
+                "warnings": [],
+                "errors": [{"code": "configuration_invalid", "message": str(exc)}],
+            }
+            print(json.dumps(report, indent=2, sort_keys=True))
+            return 2
+        print(json.dumps(report, indent=2, sort_keys=True))
+        return 0
     if args.command == "job":
         jobs = _jobs(args)
         if args.job_command == "cancel":
